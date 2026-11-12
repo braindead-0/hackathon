@@ -2,28 +2,17 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values
 from groq import Groq
 
+from backend.app.services import insforge_ai
+from backend.app.services.envconf import get as env_get
 from backend.app.services.xgb_risk import compare_with_xgboost
-
-DEFAULT_W_ENV = Path(r"C:\Users\shree\Downloads\whatsaap\w.env")
 
 
 def _groq_api_key() -> str:
-    env_key = os.environ.get("GROQ_API_KEY", "").strip()
-    if env_key:
-        return env_key
-    if DEFAULT_W_ENV.exists():
-        vals = dotenv_values(DEFAULT_W_ENV)
-        k = (vals.get("GROQ_API_KEY") or "").strip()
-        if k:
-            return k
-    return ""
+    return env_get("GROQ_API_KEY")
 
 
 def _resolve_patient(service: Any, question: str, active_session: dict[str, Any]) -> Any | None:
@@ -145,23 +134,29 @@ def answer_clinical_doubt(
         f"Ward Overview:\n{ward_summary}"
     )
 
-    client = Groq(api_key=_groq_api_key())
-    completion = client.chat.completions.create(
-        model="openai/gpt-oss-120b",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question.strip()},
-        ],
-        temperature=1,
-        max_completion_tokens=2048,
-        top_p=1,
-        reasoning_effort="medium",
-        stream=False,
-        stop=None,
-    )
-    answer = (completion.choices[0].message.content or "").strip()
+    if insforge_ai.available():
+        answer = insforge_ai.chat(system_prompt, question.strip())
+        provider = "insforge"
+    else:
+        client = Groq(api_key=_groq_api_key())
+        completion = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question.strip()},
+            ],
+            temperature=1,
+            max_completion_tokens=2048,
+            top_p=1,
+            reasoning_effort="medium",
+            stream=False,
+            stop=None,
+        )
+        answer = (completion.choices[0].message.content or "").strip()
+        provider = "groq"
     return {
         "answer": answer,
+        "provider": provider,
         "addressed_to": login_user,
         "role": login_role,
         "patient_name": ps.profile.display_name if ps else None,

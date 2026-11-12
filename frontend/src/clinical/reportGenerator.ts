@@ -28,13 +28,25 @@ export interface ReportVisualContext {
   session?: Extract<AuthSession, { role: "doctor" }> | null;
 }
 
+export type MetricKey = "heart_rate" | "spo2" | "respiratory_rate" | "temperature";
+
 export interface OrganFinding {
   organ: string;
+  metric: MetricKey;
   metricLabel: string;
   valueText: string;
   baselineText: string;
   status: "normal" | "watch" | "anomalous";
   summary: string;
+}
+
+/** Clinician-authored addendum that a doctor can edit and persist on a report. */
+export interface DoctorNotes {
+  assessment: string;
+  plan: string;
+  followUp: string;
+  editedBy?: string;
+  editedAt?: string;
 }
 
 export interface GeneratedReport {
@@ -48,6 +60,9 @@ export interface GeneratedReport {
   disclaimer: string;
   sections: ReportSection[];
   visualContext?: ReportVisualContext;
+  doctorNotes?: DoctorNotes;
+  /** Set when this report was reopened from a persisted record. */
+  recordKey?: string;
 }
 
 const DEFAULT_DISCLAIMER =
@@ -91,6 +106,20 @@ export function reportToMarkdown(report: GeneratedReport): string {
       lines.push("");
     }
   }
+
+  const notes = report.doctorNotes;
+  if (notes && (notes.assessment || notes.plan || notes.followUp)) {
+    lines.push("## Clinician addendum", "");
+    if (notes.editedBy || notes.editedAt) {
+      lines.push(
+        `_Edited by ${notes.editedBy ?? "clinician"}${notes.editedAt ? ` · ${dateTime(notes.editedAt)} UTC` : ""}_`,
+        "",
+      );
+    }
+    if (notes.assessment) lines.push(`**Assessment:** ${notes.assessment}`, "");
+    if (notes.plan) lines.push(`**Plan:** ${notes.plan}`, "");
+    if (notes.followUp) lines.push(`**Follow-up:** ${notes.followUp}`, "");
+  }
   return lines.join("\n");
 }
 
@@ -106,15 +135,29 @@ export function buildDoctorPatientReport(
     ? `${session.clinicianName} (${session.clinicianId})`
     : "Attending Clinician";
 
+  const { flagged, normalLabels } = focusedFindings(state, readings, null, false);
+
   const statusSummary = !state.timestamp
     ? "Awaiting first wearable/replay observation."
     : state.suppressed
       ? `Clinical scoring withheld due to sensor artifact (${state.alert_kind ?? "SENSOR"}).`
-      : `Current Tier: ${TIER_LABEL[state.tier]} · NEWS2 Total: ${state.news2?.total ?? "—"} (${state.news2?.risk_level ?? "not scored"}).`;
+      : `Tier ${TIER_LABEL[state.tier]} · NEWS2 ${state.news2?.total ?? "—"} (${state.news2?.risk_level ?? "not scored"}).`;
+
+  const concernBullets = flagged.length
+    ? flagged.map(
+        (f) =>
+          `${f.organ} — ${f.metricLabel} ${f.valueText} (${f.baselineText}; ${trendPhrase(f.trend, f.metric)}). ${f.summary}`,
+      )
+    : [
+        state.suppressed
+          ? "No trustworthy reading to score — verify sensor fit/connection before interpreting stability."
+          : "No physiological system is currently flagged against the personal baseline or NEWS2 thresholds.",
+      ];
 
   const vitalsRows: string[][] = [];
   if (state.news2?.parameters?.length) {
     for (const param of state.news2.parameters) {
+      if (param.score === 0 && param.value !== null) continue;
       vitalsRows.push([
         param.label,
         param.value === null ? "missing (dataAbsentReason)" : `${param.value} ${param.unit}`.trim(),
@@ -122,93 +165,86 @@ export function buildDoctorPatientReport(
         param.band,
       ]);
     }
-  } else if (state.observation) {
-    const o = state.observation;
-    vitalsRows.push(
-      ["Heart rate", `${fmtMetric(o.heart_rate)} bpm`, "—", "unscored"],
-      ["SpO₂", `${fmtMetric(o.spo2)} %`, "—", "unscored"],
-      ["Respiratory rate", `${fmtMetric(o.respiratory_rate)} br/min`, "—", "unscored"],
-      ["Temperature", `${fmtMetric(o.temperature, 1)} °C`, "—", "unscored"],
-    );
   }
 
-  const clinicalAlerts = alerts.filter((a) => a.alert_kind === "CLINICAL" && a.tier !== "NORMAL").slice(0, 8);
-  const sensorAlerts = alerts.filter((a) => a.alert_kind !== "CLINICAL").slice(0, 6);
+  const clinicalAlerts = alerts
+    .filter((a) => a.alert_kind === "CLINICAL" && a.tier !== "NORMAL")
+    .slice(0, 5);
+  const sensorAlerts = alerts.filter((a) => a.alert_kind !== "CLINICAL").slice(0, 4);
 
   const sections: ReportSection[] = [
     {
-      title: "Patient & Discharge Summary",
+      title: flagged.length ? `Immediate concerns (${flagged.length})` : "Immediate concerns",
+      paragraphs: [statusSummary],
+      bullets: concernBullets,
+    },
+    {
+      title: "Clinical context",
       bullets: [
-        `Patient: ${p.display_name} (${p.patient_id})`,
-        `Demographics: ${p.age_years} years · ${p.sex} · Discharged ${p.discharged_on}`,
-        `Scenario: ${SCENARIO_LABEL[p.scenario] ?? p.scenario}`,
-        `Status: ${statusSummary}`,
-        `FHIR R4 Observations stored in HAPI: ${state.stored_observations} · Suppressed readings: ${state.suppressed_count}`,
+        `${p.display_name} (${p.patient_id}) · ${p.age_years}y ${p.sex} · discharged ${p.discharged_on} · ${SCENARIO_LABEL[p.scenario] ?? p.scenario}`,
+        `Conditions: ${p.conditions.map((c) => c.display).join("; ") || "none documented"}`,
+        `Medications: ${p.medications.map((m) => m.display).join("; ") || "none documented"}`,
+        `Personalization: SpO₂ Scale ${p.spo2_scale} (target ${p.spo2_target[0]}–${p.spo2_target[1]}%)${p.beta_blocked ? ` · beta-blocker pulse +${p.pulse_correction_bpm} bpm` : ""}`,
+        `FHIR Observations stored: ${state.stored_observations} · suppressed artifacts: ${state.suppressed_count}`,
       ],
-    },
-    {
-      title: "Discharge Profile & Personalization Rules",
-      bullets: [
-        `Conditions: ${p.conditions.map((c) => c.display).join("; ") || "None documented"}`,
-        `Medications: ${p.medications.map((m) => m.display).join("; ") || "None documented"}`,
-        `SpO₂ Scoring Scale: Scale ${p.spo2_scale} (target ${p.spo2_target[0]}–${p.spo2_target[1]}%)`,
-        `Beta-blocker pulse adjustment: ${p.beta_blocked ? `Active (+${p.pulse_correction_bpm} bpm correction)` : "Not active"}`,
-        ...p.rules.map((r) => `Rule [${r.title}]: ${r.profile_fact} → ${r.effect}`),
-      ],
-      paragraphs: p.notes ? [`Clinical notes: ${p.notes}`] : undefined,
-    },
-    {
-      title: "Latest Vitals & NEWS2 Breakdown",
-      paragraphs: [
-        state.timestamp
-          ? `Latest observation recorded at ${dateTime(state.timestamp)} UTC (${readings.length} recent readings in window).`
-          : "No observations recorded yet.",
-      ],
-      table: {
-        headers: ["Parameter", "Reading", "NEWS2 pts", "Band"],
-        rows: vitalsRows.length > 0 ? vitalsRows : [["—", "No readings yet", "—", "—"]],
-      },
-    },
-    {
-      title: "Rolling Baseline Drift",
-      bullets:
-        state.drift.length > 0
-          ? state.drift.map(
-              (d) =>
-                `${d.label}: ${d.value} vs personal baseline ${d.baseline_center.toFixed(1)} (±${d.baseline_spread.toFixed(1)}), robust z=${d.robust_z.toFixed(2)}, sustained ${d.sustained} readings.`,
-            )
-          : [
-              state.baseline_ready
-                ? "No sustained drift from personal rolling baseline detected."
-                : "Personal rolling baseline is still warming up.",
-            ],
-    },
-    {
-      title: "Recent Clinical Alerts",
-      table: {
-        headers: ["Timestamp (UTC)", "Tier", "NEWS2", "Explanation"],
-        rows:
-          clinicalAlerts.length > 0
-            ? clinicalAlerts.map((a) => [
-                dateTime(a.timestamp),
-                TIER_LABEL[a.tier],
-                a.news2 ? String(a.news2.total) : "—",
-                a.explanation?.narrative ?? "Threshold / drift triggered.",
-              ])
-            : [["—", "None", "—", "No Watch/Review/Urgent clinical alerts in recent history."]],
-      },
-    },
-    {
-      title: "Sensor Artifact & Device Log",
-      bullets:
-        sensorAlerts.length > 0
-          ? sensorAlerts.map(
-              (a) =>
-                `${dateTime(a.timestamp)} UTC — ${a.alert_kind}: ${a.artifact.reasons.join("; ") || "Unreliable signal suppressed."}`,
-            )
-          : ["No sensor artifacts or device-offline events in recent history."],
     },
   ];
+
+  if (vitalsRows.length > 0) {
+    sections.push({
+      title: "Abnormal NEWS2 parameters",
+      paragraphs: [
+        state.timestamp
+          ? `Latest observation ${dateTime(state.timestamp)} UTC · only parameters scoring > 0 shown.`
+          : "Only parameters scoring > 0 shown.",
+      ],
+      table: { headers: ["Parameter", "Reading", "NEWS2 pts", "Band"], rows: vitalsRows },
+    });
+  }
+
+  if (state.drift.length > 0) {
+    sections.push({
+      title: "Sustained baseline drift",
+      bullets: state.drift.map(
+        (d) =>
+          `${d.label}: ${d.value} vs baseline ${d.baseline_center.toFixed(1)} (±${d.baseline_spread.toFixed(1)}), robust z=${d.robust_z.toFixed(2)}, sustained ${d.sustained} readings.`,
+      ),
+    });
+  }
+
+  if (clinicalAlerts.length > 0) {
+    sections.push({
+      title: "Recent clinical alerts",
+      table: {
+        headers: ["Timestamp (UTC)", "Tier", "NEWS2", "Explanation"],
+        rows: clinicalAlerts.map((a) => [
+          dateTime(a.timestamp),
+          TIER_LABEL[a.tier],
+          a.news2 ? String(a.news2.total) : "—",
+          a.explanation?.narrative ?? "Threshold / drift triggered.",
+        ]),
+      },
+    });
+  }
+
+  if (sensorAlerts.length > 0) {
+    sections.push({
+      title: "Sensor / device log",
+      bullets: sensorAlerts.map(
+        (a) =>
+          `${dateTime(a.timestamp)} UTC — ${a.alert_kind}: ${a.artifact.reasons.join("; ") || "unreliable signal suppressed."}`,
+      ),
+    });
+  }
+
+  sections.push({
+    title: "Other systems within range",
+    bullets: [
+      normalLabels.length
+        ? `${normalLabels.join(", ")} — within expected personal range (not itemized).`
+        : "No additional systems to report.",
+    ],
+  });
 
   return {
     id: `doc-patient-${p.patient_id}-${generatedAt}`,
@@ -297,90 +333,131 @@ export function buildPatientHealthReport(
   const p = state.profile;
   const generatedAt = nowIso();
   const obs = liveOverride ?? state.observation;
-
-  const statusText = liveOverride
-    ? "Showing live readings from your connected smartwatch alongside your clinical history."
-    : !state.timestamp
-      ? "Your wearable monitor has not sent a reading yet."
-      : state.suppressed
-        ? "Your wearable sensor had a signal issue on the last reading. Please check that your sensor is snug and charged."
-        : state.tier === "NORMAL"
-          ? "Your recent vital signs look steady and within your expected post-discharge range."
-          : state.tier === "WATCH"
-            ? "A mild change was noted in your readings. Continue monitoring and follow your discharge care plan."
-            : "Your readings show a noticeable change from your usual range. Please contact your care team for a check-in.";
+  const { flagged, normalLabels } = focusedFindings(state, readings, liveOverride, true);
 
   const targetSpo2 =
     p.spo2_scale === 2
-      ? `${p.spo2_target[0]}–${p.spo2_target[1]}% (personalized Scale 2 target)`
+      ? `${p.spo2_target[0]}–${p.spo2_target[1]}% (your personalized target)`
       : "96–100% (standard target)";
+
+  const headline = liveOverride
+    ? "Live readings from your connected smartwatch, shown with your recovery history."
+    : !state.timestamp
+      ? "Your wearable has not sent a reading yet."
+      : state.suppressed
+        ? "Your last reading had a sensor issue — check that your wearable is snug and charged."
+        : flagged.length === 0
+          ? "Your vital signs look steady and within your expected recovery range."
+          : state.tier === "WATCH"
+            ? "We noticed a mild change in your readings. Keep monitoring and follow your care plan."
+            : "We noticed a change in your readings. Please contact your care team for a check-in.";
+
+  const attentionBullets = flagged.length
+    ? flagged.map((f) => `${f.metricLabel}: ${f.valueText}. ${f.summary}`)
+    : ["Nothing needs urgent attention right now."];
+
+  const actionFor = (f: PriorityFinding): string => {
+    if (f.metric === "spo2")
+      return "Sit upright, take slow deep breaths, and re-check your oxygen. If it stays below your target, call your care team.";
+    if (f.metric === "heart_rate")
+      return "Rest quietly for 5 minutes and re-check your pulse. Avoid caffeine and exertion until it settles.";
+    if (f.metric === "respiratory_rate")
+      return "Pause activity, breathe slowly through pursed lips, and re-check. Contact your care team if breathing feels hard.";
+    return "Rest, sip fluids, and re-check your temperature. Contact your care team if a fever persists.";
+  };
+
+  const nextSteps = flagged.length
+    ? flagged.slice(0, 3).map((f) => actionFor(f))
+    : [
+        "Keep taking your medications exactly as prescribed.",
+        "Wear your sensor snugly and keep it charged so readings stay reliable.",
+        "Follow your discharge care plan and attend your follow-up appointment.",
+      ];
 
   const recentCheckins = alerts
     .filter((a) => a.alert_kind === "CLINICAL" && a.tier !== "NORMAL")
-    .slice(0, 5);
-  const deviceReminders = alerts.filter((a) => a.alert_kind !== "CLINICAL").slice(0, 4);
+    .slice(0, 3);
+
+  const sections: ReportSection[] = [
+    {
+      title: "How you are doing",
+      paragraphs: [headline],
+      bullets: [
+        `Last reading: ${liveOverride ? "live from your smartwatch" : state.timestamp ? `${dateTime(state.timestamp)} UTC` : "waiting for first reading"}`,
+        `Your oxygen (SpO₂) target: ${targetSpo2}`,
+      ],
+    },
+    {
+      title: "What needs attention",
+      bullets: attentionBullets,
+    },
+    {
+      title: "What to do next",
+      bullets: nextSteps,
+    },
+    {
+      title: "What is going well",
+      bullets: [
+        normalLabels.length
+          ? `${plainOrganList(normalLabels)} — within your normal range.`
+          : "Keep monitoring; your care team is watching your readings.",
+      ],
+    },
+  ];
+
+  if (obs) {
+    sections.push({
+      title: "Your latest numbers",
+      table: {
+        headers: ["Vital sign", "Reading", "Note"],
+        rows: [
+          ["Heart rate", `${fmtMetric(obs.heart_rate)} bpm`, p.beta_blocked ? "adjusted for your heart medication" : "resting pulse"],
+          ["Oxygen (SpO₂)", `${fmtMetric(obs.spo2)} %`, `target ${targetSpo2}`],
+          ["Breathing rate", `${fmtMetric(obs.respiratory_rate)} /min`, ""],
+          ["Temperature", `${fmtMetric(obs.temperature, 1)} °C`, ""],
+        ],
+      },
+    });
+  }
+
+  sections.push({
+    title: "Get help now if you have",
+    bullets: [
+      "Severe or worsening breathlessness, or chest pain/pressure.",
+      "Confusion, fainting, or blue lips/fingertips.",
+      "Oxygen staying below your target, or a fever that will not come down.",
+      "If symptoms are severe, call your local emergency number immediately.",
+    ],
+  });
+
+  sections.push({
+    title: "My conditions & medications",
+    bullets: [
+      `Conditions: ${p.conditions.map((c) => c.display).join(", ") || "none listed"}`,
+      `Medications: ${p.medications.map((m) => m.display).join(", ") || "none listed"}`,
+    ],
+  });
+
+  if (recentCheckins.length > 0) {
+    sections.push({
+      title: "Recent check-in notices",
+      bullets: recentCheckins.map(
+        (a) => `${dateTime(a.timestamp)} UTC — ${a.explanation?.narrative ?? "A change in your vitals was noted."}`,
+      ),
+    });
+  }
 
   return {
     id: `patient-summary-${p.patient_id}-${generatedAt}`,
     kind: "patient-summary",
-    title: `Personal Post-Discharge Health Summary`,
+    title: `My Post-Discharge Health Summary`,
     subtitle: `${p.display_name} · Discharged ${p.discharged_on}`,
     generatedAt,
     authorLabel: `${p.display_name} (Patient Portal)`,
     filename: `health-summary-${p.patient_id}.md`,
     disclaimer:
       "This summary is for personal tracking and care-team communication only — it is not a medical diagnosis. Seek urgent medical care if you feel unwell.",
-    sections: [
-      {
-        title: "Current Recovery Status",
-        paragraphs: [statusText],
-        bullets: [
-          `Last reading: ${liveOverride ? "Live from connected smartwatch" : state.timestamp ? `${dateTime(state.timestamp)} UTC` : "Waiting for first reading"}`,
-          `Readings recorded in current window: ${readings.length}`,
-          `Personal oxygen (SpO₂) target: ${targetSpo2}`,
-        ],
-      },
-      {
-        title: "Latest Vital Signs",
-        table: {
-          headers: ["Vital Sign", "Latest Reading", "Notes"],
-          rows: obs
-            ? [
-                [
-                  "Heart rate",
-                  `${fmtMetric(obs.heart_rate)} bpm`,
-                  p.beta_blocked ? "Adjusted for your beta-blocker medication" : "Resting pulse",
-                ],
-                ["Oxygen saturation (SpO₂)", `${fmtMetric(obs.spo2)} %`, `Target: ${targetSpo2}`],
-                ["Breathing rate", `${fmtMetric(obs.respiratory_rate)} breaths/min`, ""],
-                ["Body temperature", `${fmtMetric(obs.temperature, 1)} °C`, ""],
-              ]
-            : [["—", "No readings yet", "Wearable sync pending"]],
-        },
-      },
-      {
-        title: "My Conditions & Medications",
-        bullets: [
-          `Documented conditions: ${p.conditions.map((c) => c.display).join(", ") || "None listed"}`,
-          `Active medications: ${p.medications.map((m) => m.display).join(", ") || "None listed"}`,
-        ],
-      },
-      {
-        title: "Recent Check-In Notices & Device Reminders",
-        bullets: [
-          ...(recentCheckins.length > 0
-            ? recentCheckins.map(
-                (a) => `[${TIER_LABEL[a.tier]}] ${dateTime(a.timestamp)} UTC — ${a.explanation?.narrative ?? "Change in vitals noted."}`,
-              )
-            : ["No health check-in alerts recently."]),
-          ...(deviceReminders.length > 0
-            ? deviceReminders.map(
-                (a) => `[Device check] ${dateTime(a.timestamp)} UTC — ${a.artifact.reasons[0] ?? "Check wearable fit/connection."}`,
-              )
-            : []),
-        ],
-      },
-    ],
+    sections,
     visualContext: { state, alerts, readings, liveOverride },
   };
 }
@@ -411,7 +488,7 @@ export function deriveOrganFindings(
       unit: "bpm",
       digits: 0,
       highMsg: patientFriendly
-        ? "Heart rate is significantly elevated above resting range."
+        ? "Your heart rate is higher than your normal resting range."
         : "Tachycardic / elevated pulse relative to personal baseline & beta-blocker rule.",
       lowMsg: patientFriendly
         ? "Heart rate is below your normal resting range."
@@ -426,7 +503,7 @@ export function deriveOrganFindings(
       digits: 1,
       highMsg: patientFriendly ? "Oxygen level is above target." : "Above personalized SpO₂ target.",
       lowMsg: patientFriendly
-        ? `Oxygen saturation is low (${fmtMetric(obs?.spo2, 1)}% vs target ${state.profile.spo2_target[0]}–${state.profile.spo2_target[1]}%).`
+        ? `Your oxygen is low (${fmtMetric(obs?.spo2, 1)}% vs your target ${state.profile.spo2_target[0]}–${state.profile.spo2_target[1]}%).`
         : `Hypoxemic trend below Scale ${state.profile.spo2_scale} target (${state.profile.spo2_target[0]}–${state.profile.spo2_target[1]}%).`,
       okMsg: patientFriendly ? "Oxygen delivery is on target." : "Within personalized SpO₂ target.",
     },
@@ -437,7 +514,7 @@ export function deriveOrganFindings(
       unit: "br/min",
       digits: 1,
       highMsg: patientFriendly
-        ? `Breathing is rapid (${fmtMetric(obs?.respiratory_rate, 1)} breaths/min) — high respiratory workload.`
+        ? `Your breathing is faster than usual (${fmtMetric(obs?.respiratory_rate, 1)} breaths/min).`
         : "Tachypnea / elevated respiratory rate (NEWS2 high risk).",
       lowMsg: patientFriendly
         ? "Breathing rate is unusually slow."
@@ -451,7 +528,7 @@ export function deriveOrganFindings(
       unit: "°C",
       digits: 2,
       highMsg: patientFriendly
-        ? "Elevated temperature (fever)."
+        ? "You have a fever."
         : "Pyrexia / febrile elevation above baseline.",
       lowMsg: patientFriendly
         ? "Body temperature is lower than normal."
@@ -492,6 +569,7 @@ export function deriveOrganFindings(
       : "Baseline established";
     return {
       organ: s.organ,
+      metric: s.key,
       metricLabel: s.metricLabel,
       valueText: val !== undefined && val !== null ? `${fmtMetric(val, s.digits)} ${s.unit}` : "—",
       baselineText,
@@ -507,6 +585,73 @@ function escapeHtml(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+const TREND_THRESH: Record<MetricKey, number> = {
+  heart_rate: 5,
+  spo2: 1.5,
+  respiratory_rate: 2,
+  temperature: 0.3,
+};
+
+/** Coarse direction of a metric across the reading window (early third vs late third). */
+export function trendLabel(readings: Observation[], metric: MetricKey): string | null {
+  const vals = readings
+    .map((r) => r[metric])
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (vals.length < 6) return null;
+  const k = Math.max(2, Math.floor(vals.length / 3));
+  const early = vals.slice(0, k).reduce((s, v) => s + v, 0) / k;
+  const late = vals.slice(-k).reduce((s, v) => s + v, 0) / k;
+  const delta = late - early;
+  if (Math.abs(delta) < TREND_THRESH[metric]) return "steady";
+  return delta > 0 ? "rising" : "falling";
+}
+
+export interface PriorityFinding extends OrganFinding {
+  trend: string | null;
+}
+
+/**
+ * Split organ findings into the few that need attention (severe first) and a
+ * compact list of the systems that are within range, so reports lead with what
+ * matters instead of dumping every normal value.
+ */
+export function focusedFindings(
+  state: PatientStatePayload,
+  readings: Observation[],
+  liveOverride?: WatchLiveOverride | null,
+  patientFriendly = false,
+): { flagged: PriorityFinding[]; normalLabels: string[] } {
+  const rank = { anomalous: 0, watch: 1, normal: 2 } as const;
+  const all = deriveOrganFindings(state, liveOverride, patientFriendly);
+  const flagged: PriorityFinding[] = all
+    .filter((f) => f.status !== "normal")
+    .sort((a, b) => rank[a.status] - rank[b.status])
+    .map((f) => ({ ...f, trend: trendLabel(readings, f.metric) }));
+  const normalLabels = all.filter((f) => f.status === "normal").map((f) => f.organ);
+  return { flagged, normalLabels };
+}
+
+function trendPhrase(trend: string | null, metric: MetricKey): string {
+  if (!trend || trend === "steady") return "trend steady";
+  const worsening =
+    (metric === "spo2" && trend === "falling") ||
+    (metric !== "spo2" && trend === "rising");
+  return `trend ${trend}${worsening ? " (worsening)" : ""}`;
+}
+
+const PLAIN_ORGAN: Record<string, string> = {
+  "Heart & Circulation": "your heart rate",
+  "Lungs & Oxygenation": "your oxygen",
+  "Respiratory Drive": "your breathing",
+  "Systemic / Thermal": "your temperature",
+};
+
+function plainOrganList(organs: string[]): string {
+  const plain = organs.map((o) => PLAIN_ORGAN[o] ?? o);
+  if (plain.length <= 1) return plain[0] ?? "";
+  return plain.slice(0, -1).join(", ") + " and " + plain[plain.length - 1];
 }
 
 function buildSvgSparkline(
@@ -544,40 +689,99 @@ function buildSvgSparkline(
   </div>`;
 }
 
+/** Open the self-contained report in a new window and trigger the browser print / Save-as-PDF preview.
+ *  Must be called synchronously from a user gesture so the popup is not blocked. */
+export function printReport(report: GeneratedReport, twinSnapshotDataUrl?: string | null): void {
+  const html = reportToHtml(report, twinSnapshotDataUrl);
+  const win = window.open("", "_blank", "width=1000,height=800");
+  if (!win) {
+    window.print();
+    return;
+  }
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  let printed = false;
+  const doPrint = () => {
+    if (printed) return;
+    printed = true;
+    win.focus();
+    win.print();
+  };
+  win.onload = () => window.setTimeout(doPrint, 150);
+  window.setTimeout(doPrint, 1200);
+}
+
 export function reportToHtml(report: GeneratedReport, twinSnapshotDataUrl?: string | null): string {
   const vc = report.visualContext;
-  const findings = vc
-    ? deriveOrganFindings(vc.state, vc.liveOverride, report.kind === "patient-summary")
-    : [];
+  const patientFriendly = report.kind === "patient-summary";
+  const focus = vc
+    ? focusedFindings(vc.state, vc.readings, vc.liveOverride, patientFriendly)
+    : { flagged: [] as PriorityFinding[], normalLabels: [] as string[] };
+  const obs = vc ? (vc.liveOverride ?? vc.state.observation) : null;
+  const allFindings = vc ? deriveOrganFindings(vc.state, vc.liveOverride, patientFriendly) : [];
 
-  const findingsHtml = findings.length
-    ? `<section><h2>3D Organ &amp; System Findings</h2>
-        ${
-          twinSnapshotDataUrl
-            ? `<div class="twin-snap"><img src="${twinSnapshotDataUrl}" alt="3D Digital Twin showing highlighted organs" /></div>`
-            : ""
-        }
-        <div class="findings-grid">
-          ${findings
-            .map(
-              (f) => `<div class="finding finding--${f.status}">
-                <div class="finding-top"><strong>${escapeHtml(f.organ)}</strong><span class="badge badge--${f.status}">${f.status.toUpperCase()}</span></div>
-                <div class="finding-val">${escapeHtml(f.metricLabel)}: <strong>${escapeHtml(f.valueText)}</strong> <span class="muted">(${escapeHtml(f.baselineText)})</span></div>
-                <p>${escapeHtml(f.summary)}</p>
-              </div>`,
-            )
-            .join("")}
-        </div></section>`
+  const STD_RANGE: Record<MetricKey, [number, number]> = {
+    heart_rate: [60, 100],
+    spo2: [95, 100],
+    respiratory_rate: [12, 20],
+    temperature: [36.1, 37.2],
+  };
+  const METRIC_UNIT: Record<MetricKey, string> = {
+    heart_rate: "bpm",
+    spo2: "%",
+    respiratory_rate: "br/min",
+    temperature: "°C",
+  };
+  const METRIC_DIGITS: Record<MetricKey, number> = {
+    heart_rate: 0,
+    spo2: 1,
+    respiratory_rate: 1,
+    temperature: 1,
+  };
+
+  const vitalRows = allFindings
+    .map((f) => {
+      const val = obs ? obs[f.metric] : null;
+      const base = vc?.state.baselines?.[f.metric];
+      const [lo, hi] = base
+        ? [base.center - 2 * base.spread, base.center + 2 * base.spread]
+        : STD_RANGE[f.metric];
+      const d = METRIC_DIGITS[f.metric];
+      const has = val !== null && val !== undefined;
+      const result = has ? val!.toFixed(d) : "—";
+      const abn = has && (val! > hi || val! < lo);
+      return `<tr><td class="tname">${escapeHtml(f.metricLabel)}</td><td class="colon">:</td><td class="val${abn ? " abn" : ""}">${result} ${escapeHtml(METRIC_UNIT[f.metric])}</td><td class="range">${lo.toFixed(d)} - ${hi.toFixed(d)}</td></tr>`;
+    })
+    .join("");
+
+  const findingsHtml = vc
+    ? `<h2 class="sec">Key Findings</h2>
+      ${
+        focus.flagged.length
+          ? focus.flagged
+              .map(
+                (f) =>
+                  `<p class="finding"><strong>${escapeHtml(f.organ)}</strong> : <span class="val abn">${escapeHtml(f.valueText)}</span> — ${escapeHtml(f.summary)}</p>`,
+              )
+              .join("")
+          : `<p>No physiological system is currently flagged against the personal baseline.</p>`
+      }
+      ${
+        focus.normalLabels.length
+          ? `<p class="within">Within range: ${escapeHtml(focus.normalLabels.join(", "))}.</p>`
+          : ""
+      }`
     : "";
 
   const chartsHtml =
     vc && vc.readings.length > 1
-      ? `<section><h2>Vital Sign Trends</h2><div class="charts-grid">
-          ${buildSvgSparkline(vc.readings, "heart_rate", "Heart Rate", "bpm", "#d9483b")}
-          ${buildSvgSparkline(vc.readings, "spo2", "SpO₂", "%", "#1d70b8")}
-          ${buildSvgSparkline(vc.readings, "respiratory_rate", "Respiratory Rate", "br/min", "#0f766e")}
-          ${buildSvgSparkline(vc.readings, "temperature", "Temperature", "°C", "#c27803")}
-        </div></section>`
+      ? `<h2 class="sec">Vital Sign Trends</h2><div class="charts-grid">
+          ${buildSvgSparkline(vc.readings, "heart_rate", "Heart Rate", "bpm", "#1a3fa0")}
+          ${buildSvgSparkline(vc.readings, "spo2", "SpO₂", "%", "#1a3fa0")}
+          ${buildSvgSparkline(vc.readings, "respiratory_rate", "Respiratory Rate", "br/min", "#1a3fa0")}
+          ${buildSvgSparkline(vc.readings, "temperature", "Temperature", "°C", "#1a3fa0")}
+        </div>`
       : "";
 
   const sectionsHtml = report.sections
@@ -589,13 +793,55 @@ export function reportToHtml(report: GeneratedReport, twinSnapshotDataUrl?: stri
           : "";
       const tbl =
         sec.table && sec.table.rows.length
-          ? `<table><thead><tr>${sec.table.headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead><tbody>${sec.table.rows
+          ? `<table class="cols"><thead><tr>${sec.table.headers.map((h) => `<th>${escapeHtml(h)}</th>`).join("")}</tr></thead><tbody>${sec.table.rows
               .map((r) => `<tr>${r.map((c) => `<td>${escapeHtml(c)}</td>`).join("")}</tr>`)
               .join("")}</tbody></table>`
           : "";
-      return `<section><h2>${escapeHtml(sec.title)}</h2>${ps}${bs}${tbl}</section>`;
+      return `<section><h2 class="sec">${escapeHtml(sec.title)}</h2>${ps}${bs}${tbl}</section>`;
     })
     .join("");
+
+  const notes = report.doctorNotes;
+  const notesHtml =
+    notes && (notes.assessment || notes.plan || notes.followUp)
+      ? `<section><h2 class="sec">Clinician Addendum</h2>
+          ${
+            notes.editedBy || notes.editedAt
+              ? `<p class="muted">Edited by ${escapeHtml(notes.editedBy ?? "clinician")}${notes.editedAt ? ` · ${escapeHtml(dateTime(notes.editedAt))} UTC` : ""}</p>`
+              : ""
+          }
+          ${notes.assessment ? `<p><strong>Assessment:</strong> ${escapeHtml(notes.assessment)}</p>` : ""}
+          ${notes.plan ? `<p><strong>Plan:</strong> ${escapeHtml(notes.plan)}</p>` : ""}
+          ${notes.followUp ? `<p><strong>Follow-up:</strong> ${escapeHtml(notes.followUp)}</p>` : ""}
+        </section>`
+      : "";
+
+  const billNo = (() => {
+    let h = 0;
+    for (const ch of report.id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return 10000 + (h % 90000);
+  })();
+  const gd = new Date(report.generatedAt);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const reportDate = `${pad(gd.getDate())}.${pad(gd.getMonth() + 1)}.${gd.getFullYear()}`;
+  const clinician = vc?.session?.clinicianName ?? "VitalTwin Care Team";
+  const copyTag = patientFriendly ? "PATIENT" : "CLINICAL";
+
+  const particularsHtml = vc
+    ? `<div class="particulars">
+        <div class="left">
+          <div>B.NO: ${billNo}</div>
+          <div>Patients Name: ${escapeHtml(vc.state.profile.display_name)}</div>
+          <div>Ref.By: ${escapeHtml(clinician)}</div>
+        </div>
+        <div class="right">
+          <div>Age: ${vc.state.profile.age_years} yrs &nbsp;&nbsp; Sex: ${escapeHtml(vc.state.profile.sex)}</div>
+          <div>Date: ${reportDate}</div>
+          <div>Discharged: ${escapeHtml(vc.state.profile.discharged_on)}</div>
+          <div>Copy: ${copyTag}</div>
+        </div>
+      </div>`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -604,52 +850,89 @@ export function reportToHtml(report: GeneratedReport, twinSnapshotDataUrl?: stri
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>${escapeHtml(report.title)}</title>
 <style>
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #162229; background: #f4f7f8; margin: 0; padding: 24px; line-height: 1.5; }
-  .sheet { max-width: 900px; margin: 0 auto; background: #fff; border: 1px solid #d5dee3; border-radius: 12px; padding: 28px; }
-  header { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid #d5dee3; padding-bottom: 14px; margin-bottom: 16px; }
-  h1 { margin: 4px 0; font-size: 22px; }
-  h2 { font-size: 16px; margin: 22px 0 8px; color: #0b2d3c; border-bottom: 1px solid #eef2f4; padding-bottom: 4px; }
-  .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #566973; }
-  .meta { font-size: 12.5px; color: #465862; text-align: right; }
-  .notice { background: #fff8e6; border: 1px solid #f0d78c; border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 16px; }
-  .twin-snap { text-align: center; background: #0f1a20; border-radius: 10px; padding: 10px; margin-bottom: 12px; }
-  .twin-snap img { max-height: 300px; max-width: 100%; border-radius: 6px; }
-  .findings-grid, .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
-  .finding, .chart-card { border: 1px solid #d5dee3; border-radius: 8px; padding: 10px 12px; background: #fbfcfd; }
-  .finding--watch { border-color: #e6a817; background: #fffbf0; }
-  .finding--anomalous { border-color: #d9483b; background: #fff5f5; }
-  .finding-top, .chart-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; margin-bottom: 4px; }
-  .finding-val { font-size: 13px; margin-bottom: 4px; }
-  .finding p { margin: 0; font-size: 12.5px; color: #465862; }
-  .badge { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 999px; }
-  .badge--normal { background: #e3f5ec; color: #166534; }
-  .badge--watch { background: #fef3c7; color: #92400e; }
-  .badge--anomalous { background: #fee2e2; color: #991b1b; }
-  .chart-range, .muted { font-size: 11px; color: #566973; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #e6edf0; }
-  th { background: #f6f9fa; font-weight: 600; }
-  ul { margin: 6px 0; padding-left: 20px; }
-  li { margin: 3px 0; font-size: 13.5px; }
+  body { font-family: Arial, Helvetica, sans-serif; color: #000; background: #fff; margin: 0; padding: 16px; font-size: 12.5px; line-height: 1.5; }
+  .sheet { max-width: 820px; margin: 0 auto; padding: 10px 26px 26px; }
+  .lab-head { text-align: center; color: #1a3fa0; border-top: 2px solid #1a3fa0; border-bottom: 2px solid #1a3fa0; padding: 8px 6px 7px; }
+  .lab-name { font-family: 'Times New Roman', serif; font-weight: bold; font-size: 22px; letter-spacing: .5px; }
+  .lab-centre { font-family: 'Times New Roman', serif; font-weight: bold; font-size: 18px; letter-spacing: .4px; }
+  .lab-addr { font-weight: bold; font-size: 11px; margin-top: 3px; }
+  .lab-services { font-family: 'Times New Roman', serif; font-style: italic; font-weight: bold; font-size: 11.5px; margin-top: 2px; }
+  .lab-tag { font-family: 'Times New Roman', serif; font-style: italic; font-weight: bold; font-size: 13.5px; margin-top: 5px; }
+  .report-title { text-align: center; font-weight: bold; font-size: 14px; margin: 12px 0 2px; text-transform: uppercase; letter-spacing: .4px; }
+  .report-sub { text-align: center; font-size: 11px; color: #333; margin-bottom: 4px; }
+  .particulars { display: flex; justify-content: space-between; gap: 20px; margin: 16px 0 4px; }
+  .particulars .left div, .particulars .right div { margin: 4px 0; }
+  .particulars .right { min-width: 40%; }
+  h2.sec { font-size: 12.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.2px; text-decoration: underline; text-underline-offset: 4px; margin: 20px 0 8px; }
+  table.cols { width: 100%; border-collapse: collapse; }
+  table.cols th, table.cols td { border: none; padding: 7px 10px 7px 0; text-align: left; vertical-align: top; }
+  table.cols th { font-weight: normal; }
+  td.tname, th.tname { width: 34%; }
+  td.colon, th.colon { width: 2%; padding-right: 4px; }
+  td.val, th.val { width: 30%; font-family: 'Courier New', monospace; }
+  td.range, th.range { width: 34%; }
+  .val.abn { font-weight: bold; }
+  p.finding { margin: 6px 0; }
+  p.finding .val { font-family: 'Courier New', monospace; }
+  .within, .muted { color: #333; font-size: 11.5px; }
+  section p { margin: 6px 0; }
+  section ul { margin: 6px 0; padding-left: 22px; }
+  section li { margin: 3px 0; }
+  .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .chart-card { padding: 4px 6px; }
+  .chart-head { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
+  .chart-title, .chart-range { font-size: 11px; color: #333; }
+  .twin-snap { text-align: center; margin: 14px 0; }
+  .twin-snap img { max-height: 250px; max-width: 100%; }
+  .sig { display: flex; justify-content: space-between; align-items: flex-end; margin-top: 36px; }
+  .sig .left, .sig .right { text-align: left; }
+  .sig .role { margin-top: 2px; }
+  .closing { text-align: center; margin-top: 20px; }
+  .closing div { margin: 3px 0; }
+  .fine { text-align: center; font-style: italic; font-size: 10.5px; color: #333; margin-top: 14px; }
+  .motto { text-align: center; color: #c00; font-family: 'Segoe Script', 'Brush Script MT', 'Comic Sans MS', cursive; font-style: italic; font-weight: bold; font-size: 19px; margin-top: 26px; }
+  @media print { body { padding: 0; } .sheet { max-width: none; padding: 0 8mm; } }
 </style>
 </head>
 <body>
   <article class="sheet">
-    <header>
-      <div>
-        <div class="eyebrow">PS-03 Post-Discharge Monitor · ${report.kind === "patient-summary" ? "Patient Copy" : "Clinical Copy"}</div>
-        <h1>${escapeHtml(report.title)}</h1>
-        <div class="muted">${escapeHtml(report.subtitle)}</div>
-      </div>
-      <div class="meta">
-        <div><strong>Generated:</strong> ${escapeHtml(dateTime(report.generatedAt))} UTC</div>
-        <div><strong>Prepared:</strong> ${escapeHtml(report.authorLabel)}</div>
-      </div>
-    </header>
-    <div class="notice">${escapeHtml(report.disclaimer)}</div>
+    <div class="lab-head">
+      <div class="lab-name">VITALTWIN LAB</div>
+      <div class="lab-centre">VITALTWIN DIGITAL HEALTH CENTRE</div>
+      <div class="lab-addr">Post-Discharge Remote Monitoring · Clinical Decision Support · Synthetic Data</div>
+      <div class="lab-services">Continuous Wearable Vitals, NEWS2 Scoring, Personal Baseline Drift, FHIR R4 Observations</div>
+      <div class="lab-tag">Complete Post-Discharge Monitoring Done here.</div>
+    </div>
+    <div class="report-title">${escapeHtml(report.title)}</div>
+    <div class="report-sub">${escapeHtml(report.subtitle)}</div>
+    ${particularsHtml}
+    ${
+      vc
+        ? `<h2 class="sec">Vital Signs</h2>
+          <table class="cols"><thead><tr><th class="tname">Test Name</th><th class="colon"></th><th class="val">Values</th><th class="range">Normal Range</th></tr></thead><tbody>${vitalRows}</tbody></table>`
+        : ""
+    }
     ${findingsHtml}
+    ${twinSnapshotDataUrl ? `<div class="twin-snap"><img src="${twinSnapshotDataUrl}" alt="3D Digital Twin showing highlighted organs" /></div>` : ""}
     ${chartsHtml}
     ${sectionsHtml}
+    ${notesHtml}
+    <div class="sig">
+      <div class="left">
+        <svg width="90" height="34" viewBox="0 0 90 34" aria-hidden="true"><path d="M6 26 C 14 6, 20 6, 24 20 S 34 30, 40 14 S 52 4, 56 18 S 70 26, 84 10" fill="none" stroke="#223" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <div class="role">Lab Incharge</div>
+      </div>
+      <div class="right">
+        <div>${escapeHtml(clinician)}</div>
+        <div class="role">Consultant, Remote Monitoring</div>
+      </div>
+    </div>
+    <div class="closing">
+      <div>Fully Computerised Monitoring</div>
+      <div>Get Well Soon</div>
+    </div>
+    <div class="fine">${escapeHtml(report.disclaimer)}</div>
+    <div class="motto">Care is Our Concern</div>
   </article>
 </body>
 </html>`;

@@ -4,7 +4,10 @@ import { AlertCard } from "../AlertCard";
 import { ClinicalTwin3D } from "../ClinicalTwin3D";
 import { usePatient } from "../hooks";
 import { ReportModal } from "../ReportModal";
-import { buildDoctorPatientReport, type GeneratedReport } from "../reportGenerator";
+import { SavedReportsPanel } from "../SavedReports";
+import { buildDoctorPatientReport, reportToHtml, type GeneratedReport } from "../reportGenerator";
+import { clinicalApi } from "../api";
+import { ReportEmailStatus, useReportEmail } from "../reportEmail";
 import {
   DriftPanel,
   News2Breakdown,
@@ -24,13 +27,16 @@ export function PatientPage({
   onOpenFhir,
 }: {
   patientId: string;
-  session?: Extract<AuthSession, { role: "doctor" }> | null;
+  session: Extract<AuthSession, { role: "doctor" }>;
   onBack: () => void;
   onOpenFhir: (id: string) => void;
 }) {
   const { state, alerts, readings, connection, error } = usePatient(patientId);
   const [alertFilter, setAlertFilter] = useState<AlertFilter>("clinical");
   const [report, setReport] = useState<GeneratedReport | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [savedRefresh, setSavedRefresh] = useState(0);
+  const reportEmail = useReportEmail();
 
   useEffect(() => {
     setAlertFilter("clinical");
@@ -119,10 +125,23 @@ export function PatientPage({
           <div className="row row--tight">
             <button
               className="btn btn--small btn--primary"
-              onClick={() => setReport(buildDoctorPatientReport(state, alerts, readings, session))}
+              disabled={reportEmail.status.sending}
+              onClick={() => {
+                const generated = buildDoctorPatientReport(state, alerts, readings, session);
+                reportEmail.generate(generated, session);
+                setReport(generated);
+                clinicalApi.storeReport({ patient_id: patientId, title: generated.title, html: reportToHtml(generated) })
+                  .then(() => setSavedRefresh((value) => value + 1))
+                  .catch(() => {});
+              }}
             >
               Generate Clinical Report
             </button>
+            {report && (
+              <button className="btn btn--small" onClick={() => setReportOpen(true)}>
+                Review / edit last report
+              </button>
+            )}
             <button className="btn btn--small" onClick={() => onOpenFhir(patientId)}>
               View stored FHIR
             </button>
@@ -136,6 +155,8 @@ export function PatientPage({
           <span className="code">dataAbsentReason</span>, never as a zero.
         </p>
       </Panel>
+
+      <ReportEmailStatus status={reportEmail.status} />
 
       <Panel
         title="3D Digital Twin"
@@ -250,7 +271,15 @@ export function PatientPage({
         </div>
       </div>
 
-      {report && <ReportModal report={report} onClose={() => setReport(null)} />}
+      <SavedReportsPanel patientId={patientId} refreshToken={savedRefresh} />
+
+      {report && reportOpen && (
+        <ReportModal
+          report={report}
+          onClose={() => setReportOpen(false)}
+          onSaved={() => setSavedRefresh((v) => v + 1)}
+        />
+      )}
     </div>
   );
 }

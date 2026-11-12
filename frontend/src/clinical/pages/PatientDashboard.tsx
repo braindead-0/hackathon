@@ -4,8 +4,10 @@ import { SmartwatchSimulator } from "../SmartwatchSimulator";
 import { clinicalApi } from "../api";
 import { usePatient } from "../hooks";
 import { VitalsStrip } from "../PatientPanels";
-import { ReportModal } from "../ReportModal";
-import { buildPatientHealthReport, type GeneratedReport } from "../reportGenerator";
+import { SavedReportsPanel } from "../SavedReports";
+import { buildPatientHealthReport, reportToHtml } from "../reportGenerator";
+import type { AuthSession } from "../auth";
+import { ReportEmailStatus, useReportEmail } from "../reportEmail";
 import type { FhirObservation } from "../types";
 import { VitalsCharts } from "../VitalsCharts";
 import { Empty, Panel, TIER_LABEL, dateTime } from "../ui";
@@ -64,9 +66,13 @@ function patientStatusCopy(
   };
 }
 
-export function PatientDashboard({ patientId }: { patientId: string }) {
+export function PatientDashboard({ patientId, session }: {
+  patientId: string;
+  session: Extract<AuthSession, { role: "patient" }>;
+}) {
   const { state, alerts, readings, connection, error } = usePatient(patientId);
-  const [report, setReport] = useState<GeneratedReport | null>(null);
+  const reportEmail = useReportEmail();
+  const [savedRefresh, setSavedRefresh] = useState(0);
   const [streamingBusy, setStreamingBusy] = useState(false);
   const [fhirEntries, setFhirEntries] = useState<FhirObservation[]>([]);
   const [hapiHealthy, setHapiHealthy] = useState<boolean | null>(null);
@@ -144,6 +150,15 @@ export function PatientDashboard({ patientId }: { patientId: string }) {
   const checkIns = alerts.filter((a) => a.alert_kind === "CLINICAL" && a.tier !== "NORMAL").slice(0, 8);
   const deviceNotices = alerts.filter((a) => a.alert_kind !== "CLINICAL").slice(0, 6);
 
+  const handleGenerate = () => {
+    const rep = buildPatientHealthReport(state, alerts, readings, watchConnected ? watchValues : null);
+    reportEmail.generate(rep, session);
+    clinicalApi
+      .storeReport({ patient_id: patientId, title: rep.title, html: reportToHtml(rep) })
+      .then(() => setSavedRefresh((v) => v + 1))
+      .catch(() => {});
+  };
+
   return (
     <div className="col patient-dash">
       <div className="spread">
@@ -178,21 +193,15 @@ export function PatientDashboard({ patientId }: { patientId: string }) {
           </button>
           <button
             className="btn btn--primary"
-            onClick={() =>
-              setReport(
-                buildPatientHealthReport(
-                  state,
-                  alerts,
-                  readings,
-                  watchConnected ? watchValues : null,
-                ),
-              )
-            }
+            onClick={handleGenerate}
+            disabled={reportEmail.status.sending}
           >
             Generate My Health Report
           </button>
         </div>
       </div>
+
+      <ReportEmailStatus status={reportEmail.status} />
 
       <section className={`patient-banner patient-banner--${status.tone}`}>
         <div className="spread">
@@ -451,7 +460,7 @@ export function PatientDashboard({ patientId }: { patientId: string }) {
         </>
       )}
 
-      {report && <ReportModal report={report} onClose={() => setReport(null)} />}
+      <SavedReportsPanel patientId={patientId} refreshToken={savedRefresh} />
     </div>
   );
 }

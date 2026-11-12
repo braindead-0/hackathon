@@ -13,9 +13,13 @@ frontend/dist/
 # Runtime data (generated on first start)
 data/*.db
 data/*.db-*
+data/report_email_state.json
 
 # Environment / secrets
 .env
+.env.local
+.env*.local
+w.env
 
 # Blender temporary files
 *.blend1
@@ -47,3 +51,18 @@ var/
 
 # Synthea generated output
 data/synthea/output/
+
+# InsForge & AI agent skills
+.insforge
+.agent
+.agents
+.augment
+.claude
+.cline
+.github/copilot*
+.kilocode
+.qoder
+.qwen
+.roo
+.trae
+.windsurf

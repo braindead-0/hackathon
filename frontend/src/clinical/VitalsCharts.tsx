@@ -1,14 +1,14 @@
 import {
+  Area,
+  AreaChart,
   CartesianGrid,
-  Line,
-  LineChart,
   ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { LOINC, type Metric } from "./api";
+import { LOINC, VITAL_COLOR, type Metric } from "./api";
 import type { Observation } from "./types";
 import { clock } from "./ui";
 
@@ -45,7 +45,7 @@ function VitalChart({
   readings,
   baseline,
   untrusted,
-  height = 132,
+  height = 150,
 }: {
   metric: Metric;
   readings: Observation[];
@@ -54,35 +54,42 @@ function VitalChart({
   height?: number;
 }) {
   const meta = LOINC[metric];
+  const color = untrusted ? "#4b57a6" : (VITAL_COLOR[metric] ?? "#1d2b36");
   const data = toPoints(readings, metric);
   const present = data.filter((d) => d.value !== null);
   const digits = DIGITS[metric] ?? 1;
+  const latest = present.length ? present[present.length - 1].value : null;
+
+  const times = data.map((d) => d.t);
+  const tMin = times.length ? Math.min(...times) : 0;
+  const tMax = times.length ? Math.max(...times) : 0;
+  const span = tMax - tMin;
+  const single = span <= 0;
+  const showSeconds = span < 5 * 60 * 1000;
+  const gradId = `vgrad-${metric}`;
 
   return (
-    <figure style={{ margin: 0, minWidth: 0 }}>
-      <figcaption
-        className="spread"
-        style={{ marginBottom: 4, alignItems: "baseline" }}
-      >
-        <span style={{ fontSize: 12.5, fontWeight: 640 }}>
+    <figure className="vchart">
+      <figcaption className="vchart__head">
+        <span className="vchart__name">
+          <span className="vchart__dot" style={{ background: color }} aria-hidden />
           {meta.label}
           <span className="muted" style={{ fontWeight: 500 }}>
             {" "}
             ({meta.unit})
           </span>
         </span>
-        {untrusted ? (
-          <span className="chip chip--sensor">latest signal untrusted</span>
-        ) : baseline ? (
-          <span className="muted" style={{ fontSize: 11 }}>
-            baseline {baseline.center.toFixed(digits)} ±{(3 * baseline.spread).toFixed(digits)}
-          </span>
-        ) : (
-          <span className="muted" style={{ fontSize: 11 }}>
-            baseline learning
-          </span>
-        )}
+        <span className="vchart__latest" style={{ color }}>
+          {latest === null ? "—" : latest.toFixed(digits)}
+        </span>
       </figcaption>
+      <div className="vchart__sub muted">
+        {untrusted
+          ? "latest signal untrusted"
+          : baseline
+            ? `baseline ${baseline.center.toFixed(digits)} ±${(3 * baseline.spread).toFixed(digits)}`
+            : "baseline learning"}
+      </div>
       {present.length === 0 ? (
         <div
           className="empty"
@@ -92,46 +99,62 @@ function VitalChart({
         </div>
       ) : (
         <ResponsiveContainer width="100%" height={height}>
-          <LineChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
-            <CartesianGrid stroke="#D5DEE3" strokeDasharray="2 4" vertical={false} />
+          <AreaChart data={data} margin={{ top: 6, right: 10, bottom: 0, left: -14 }}>
+            <defs>
+              <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={color} stopOpacity={0.22} />
+                <stop offset="100%" stopColor={color} stopOpacity={0.02} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid stroke="#E3EAEE" strokeDasharray="2 4" vertical={false} />
             <XAxis
               dataKey="t"
               type="number"
               scale="time"
-              domain={["dataMin", "dataMax"]}
-              tickFormatter={(t) => clock(new Date(Number(t)).toISOString(), false)}
+              domain={single ? [tMin - 60000, tMax + 60000] : ["dataMin", "dataMax"]}
+              ticks={single ? [tMin] : undefined}
+              tickFormatter={(t) => clock(new Date(Number(t)).toISOString(), showSeconds)}
               tick={{ fontSize: 10, fill: "#5B6F7C" }}
-              minTickGap={44}
+              minTickGap={36}
+              tickCount={4}
+              axisLine={{ stroke: "#D5DEE3" }}
+              tickLine={false}
             />
             <YAxis
               domain={["auto", "auto"]}
               tick={{ fontSize: 10, fill: "#5B6F7C" }}
               width={46}
               tickFormatter={(v) => Number(v).toFixed(digits)}
+              axisLine={false}
+              tickLine={false}
             />
             <Tooltip
               labelFormatter={(t) => `${clock(new Date(Number(t)).toISOString())} UTC`}
               formatter={(v) => [`${Number(v).toFixed(digits)} ${meta.unit}`, meta.label]}
+              contentStyle={{ borderRadius: 8, border: "1px solid #d5dee3", fontSize: 12 }}
             />
             {baseline && (
               <ReferenceArea
                 y1={baseline.center - 3 * baseline.spread}
                 y2={baseline.center + 3 * baseline.spread}
-                fill="#0E7C7B"
-                fillOpacity={0.09}
+                fill={color}
+                fillOpacity={0.07}
                 stroke="none"
                 ifOverflow="extendDomain"
               />
             )}
-            <Line
+            <Area
               dataKey="value"
-              stroke={untrusted ? "#4B57A6" : "#1D2B36"}
-              strokeWidth={1.7}
-              dot={present.length === 1 ? { r: 3 } : false}
+              type="monotone"
+              stroke={color}
+              strokeWidth={2}
+              fill={`url(#${gradId})`}
               connectNulls={false}
               isAnimationActive={false}
+              dot={present.length === 1 ? { r: 3, fill: color, strokeWidth: 0 } : false}
+              activeDot={{ r: 4, fill: color, strokeWidth: 0 }}
             />
-          </LineChart>
+          </AreaChart>
         </ResponsiveContainer>
       )}
     </figure>

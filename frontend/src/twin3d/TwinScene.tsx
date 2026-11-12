@@ -71,7 +71,7 @@ export function TwinScene({
               }}
             />
           </Suspense>
-          <OrbitControls target={[0, 0.86, 0]} enablePan={false} minDistance={1.2} maxDistance={6} minPolarAngle={0.3} maxPolarAngle={1.8} />
+          <OrbitControls makeDefault target={[0, 0.86, 0]} enablePan={false} minDistance={1.2} maxDistance={6} minPolarAngle={0.3} maxPolarAngle={1.8} />
         </Canvas>
         {(Object.keys(labelEls.current) as LabelKey[]).map((key) => (
           <div
@@ -195,6 +195,34 @@ function Anatomy({
   }, [layers, parts]);
 
   const { camera, size } = useThree();
+  const controls = useThree((s) => s.controls) as {
+    target: THREE.Vector3;
+    minDistance: number;
+    maxDistance: number;
+    update: () => void;
+  } | null;
+
+  // Frame the loaded body to fill the viewport instead of trusting fixed camera constants.
+  useEffect(() => {
+    const box = new THREE.Box3().setFromObject(root);
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const extent = box.getSize(new THREE.Vector3());
+    const cam = camera as THREE.PerspectiveCamera;
+    const vFov = (cam.fov * Math.PI) / 180;
+    const aspect = cam.aspect || size.width / Math.max(size.height, 1);
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+    const dist =
+      Math.max(extent.y / 2 / Math.tan(vFov / 2), extent.x / 2 / Math.tan(hFov / 2)) * 1.12;
+    cam.position.set(center.x, center.y, center.z + dist);
+    if (controls) {
+      controls.minDistance = dist * 0.4;
+      controls.maxDistance = dist * 2.2;
+      controls.target.copy(center);
+      controls.update();
+    }
+    cam.updateProjectionMatrix();
+  }, [root, camera, controls, size.width, size.height]);
   const visRef = useRef(labelVisible);
   visRef.current = labelVisible;
   const anchors = useMemo(() => {

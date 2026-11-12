@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { clinicalApi } from "./api";
-import { clearSession, loadSession, saveSession, type AuthSession } from "./auth";
+import { activeSessionInput, clearSession, loadSession, saveSession, type AuthSession } from "./auth";
+import { ReportEmailSettings } from "./ReportEmailSettings";
 import "./clinical.css";
 import { useWard } from "./hooks";
 import { FhirPage } from "./pages/FhirPage";
@@ -43,16 +44,7 @@ export function ClinicalApp({ digitalTwin }: { digitalTwin: ReactNode }) {
 
   useEffect(() => {
     void clinicalApi
-      .setActiveSession({
-        role: session?.role ?? null,
-        display_name:
-          session?.role === "doctor"
-            ? session.clinicianName
-            : session?.role === "patient"
-              ? session.patientName
-              : null,
-        patient_id: session?.role === "patient" ? session.patientId : null,
-      })
+      .setActiveSession(activeSessionInput(session))
       .catch(() => {});
   }, [session]);
 
@@ -187,10 +179,12 @@ export function ClinicalApp({ digitalTwin }: { digitalTwin: ReactNode }) {
           </section>
         )}
 
+        {session && <ReportEmailSettings key={JSON.stringify(session)} session={session} />}
+
         {!session ? (
           <SignInPage rows={ward.rows} onSignIn={handleSignIn} />
         ) : session.role === "patient" ? (
-          <PatientDashboard patientId={session.patientId} />
+          <PatientDashboard key={session.patientId} patientId={session.patientId} session={session} />
         ) : (
           <>
             {route.page === "ward" && (
@@ -205,6 +199,7 @@ export function ClinicalApp({ digitalTwin }: { digitalTwin: ReactNode }) {
             )}
             {route.page === "patient" && (
               <PatientPage
+                key={route.id}
                 patientId={route.id}
                 session={session}
                 onBack={() => go("#/ward")}

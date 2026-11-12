@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import re
 from datetime import datetime, timedelta
 from html import escape
 from typing import Any
@@ -11,12 +14,15 @@ import uuid
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, WebSocket
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from backend.app.api.deps import Container, get_container
 from backend.app.services.clinical import WARD_CHANNEL
 from backend.app.services.groq_qa import answer_clinical_doubt
+from backend.app.services import insforge_storage
+from backend.app.services import email_report, report_mailer
 from backend.app.services.whatsapp import send_whatsapp_alert, send_whatsapp_report
+from backend.app.services.telegram import send_telegram_alert, send_telegram_report
 from backend.app.services.xgb_risk import compare_with_xgboost
 from clinical.fhir import VITAL_CODINGS, build_reading_bundle, naive_utc
 from clinical.hapi_client import HapiError
@@ -26,7 +32,13 @@ router = APIRouter(tags=["clinical"])
 
 DISCLAIMER = "Clinical decision support, not medical diagnosis."
 _whatsapp_jobs: dict[str, dict[str, Any]] = {}
-_active_session: dict[str, Any] = {"role": None, "display_name": None, "patient_id": None}
+_active_session: dict[str, Any] = {
+    "role": None,
+    "display_name": None,
+    "patient_id": None,
+    "email": None,
+    "owner_id": None,
+}
 
 
 def clinical(container: Container = Depends(get_container)):
@@ -119,7 +131,8 @@ async def ingest_bundle(request: Request, service=Depends(clinical)) -> dict[str
 
 @router.post("/api/clinical/patients/{patient_id}/readings")
 async def ingest_reading(
-    patient_id: str, reading: ReadingIn, service=Depends(clinical)
+    patient_id: str, reading: ReadingIn, service=Depends(clinical),
+    c: Container = Depends(get_container),
 ) -> dict[str, Any]:
     """Internal ingestion for the simulator and BIDMC replay.
 
@@ -221,10 +234,27 @@ async def ingest_reading(
         )
         tier_value = result.tier.value
         news2_total = result.news2.total if result.news2 else None
+        risk_level = result.news2.risk_level if result.news2 else None
+        abnormal_metrics = list(
+            dict.fromkeys(
+                [
+                    r["metric"]
+                    for r in (result.explanation.readings if result.explanation else [])
+                    if r.get("news2_points", 0) > 0
+                ]
+                + [d.metric for d in result.drift]
+            )
+        )
+
+        payload["mobile"] = c.mobile_alerts.publish(
+            patient_id=patient_id, event_id=job_id, tier=tier_value,
+            patient_name=profile.display_name, vitals=vitals_snapshot,
+            text=narrative_text,
+        )
 
         async def _send_wa_bg() -> None:
-            try:
-                wa = await asyncio.to_thread(
+            results = await asyncio.gather(
+                asyncio.to_thread(
                     send_whatsapp_alert,
                     patient_name=profile.display_name,
                     patient_id=patient_id,
@@ -233,10 +263,27 @@ async def ingest_reading(
                     vitals=vitals_snapshot,
                     narrative=narrative_text,
                     recipient_override=reading.whatsapp_to,
-                )
-                _whatsapp_jobs[job_id] = {"queued": False, **wa}
-            except Exception as exc:
-                _whatsapp_jobs[job_id] = {"queued": False, "sent": False, "error": str(exc)}
+                    abnormal=abnormal_metrics,
+                    risk_level=risk_level,
+                ),
+                asyncio.to_thread(
+                    send_telegram_alert,
+                    patient_name=profile.display_name,
+                    patient_id=patient_id,
+                    tier=tier_value,
+                    news2_total=news2_total,
+                    vitals=vitals_snapshot,
+                    narrative=narrative_text,
+                    abnormal=abnormal_metrics,
+                    risk_level=risk_level,
+                ),
+                return_exceptions=True,
+            )
+            wa, tg = [
+                {"sent": False, "error": str(item)} if isinstance(item, Exception) else item
+                for item in results
+            ]
+            _whatsapp_jobs[job_id] = {"queued": False, **wa, "telegram": tg}
 
         asyncio.create_task(_send_wa_bg())
         payload["whatsapp"] = {"queued": True, "job_id": job_id, "sent": False}
@@ -267,7 +314,12 @@ async def send_report_via_whatsapp(body: WhatsAppReportIn) -> dict[str, Any]:
                 summary_text=body.summary_text,
                 recipient_override=body.whatsapp_to,
             )
-            _whatsapp_jobs[job_id] = {"queued": False, **wa}
+            tg = await asyncio.to_thread(
+                send_telegram_report,
+                title=body.title,
+                summary_text=body.summary_text,
+            )
+            _whatsapp_jobs[job_id] = {"queued": False, **wa, "telegram": tg}
         except Exception as exc:
             _whatsapp_jobs[job_id] = {"queued": False, "sent": False, "error": str(exc)}
 
@@ -368,6 +420,16 @@ class ActiveSessionIn(BaseModel):
     role: str | None = None
     display_name: str | None = None
     patient_id: str | None = None
+    clinician_id: str | None = None
+    email: str | None = Field(default=None, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, value: str | None) -> str | None:
+        value = value.strip() if value else None
+        if value and not re.fullmatch(r"[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+", value):
+            raise ValueError("Enter a valid email address or leave it blank")
+        return value or None
 
 
 @router.post("/api/clinical/session/active")
@@ -375,6 +437,14 @@ async def set_active_session(body: ActiveSessionIn) -> dict[str, Any]:
     _active_session["role"] = body.role
     _active_session["display_name"] = body.display_name
     _active_session["patient_id"] = body.patient_id
+    owner = report_mailer.owner_key(
+        body.role, body.patient_id, body.clinician_id, body.display_name
+    )
+    _active_session["owner_id"] = owner
+    email = None
+    if body.role:
+        email = report_mailer.register_recipient(owner, body.role, body.display_name, body.email)
+    _active_session["email"] = email
     return {"ok": True, **_active_session}
 
 
@@ -420,6 +490,170 @@ async def ask_clinical_whatsapp(body: WhatsAppAskIn, service=Depends(clinical)) 
         asyncio.create_task(_send_qa_bg())
         qa["whatsapp"] = {"queued": True, "job_id": job_id, "sent": False}
     return qa
+
+
+class ReportStoreIn(BaseModel):
+    patient_id: str
+    title: str = "Health Report"
+    html: str
+    content_type: str = "text/html"
+
+
+@router.post("/api/clinical/reports/store")
+async def store_report(body: ReportStoreIn) -> dict[str, Any]:
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    slug = "".join(ch if ch.isalnum() else "-" for ch in body.title.lower()).strip("-") or "report"
+    key = f"{body.patient_id}/{stamp}-{slug}.html"
+    try:
+        result = await asyncio.to_thread(
+            insforge_storage.upload_bytes,
+            key,
+            body.html.encode("utf-8"),
+            body.content_type,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"InsForge storage upload failed: {exc}")
+    return {"bucket": insforge_storage.DEFAULT_BUCKET, "key": key, "url": result.get("url")}
+
+
+class RecordSaveIn(BaseModel):
+    patient_id: str
+    report: dict[str, Any]
+
+
+@router.post("/api/clinical/reports/record")
+async def save_record(body: RecordSaveIn) -> dict[str, Any]:
+    """Persist a full report (incl. clinician edits) as a JSON record."""
+    title = str(body.report.get("title") or "Health Report")
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    slug = "".join(ch if ch.isalnum() else "-" for ch in title.lower()).strip("-") or "report"
+    key = f"records/{body.patient_id}/{stamp}-{slug}.json"
+    data = json.dumps(body.report).encode("utf-8")
+    try:
+        await asyncio.to_thread(
+            insforge_storage.upload_bytes, key, data, "application/json"
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"InsForge storage upload failed: {exc}")
+    return {"bucket": insforge_storage.DEFAULT_BUCKET, "key": key}
+
+
+@router.get("/api/clinical/reports/records")
+async def list_records(patient_id: str = Query(...)) -> dict[str, Any]:
+    """List saved report records for a patient, newest first, with edit metadata."""
+    prefix = f"records/{patient_id}/"
+    try:
+        objs = await asyncio.to_thread(
+            insforge_storage.list_objects, prefix, insforge_storage.DEFAULT_BUCKET, 100, 0
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"InsForge storage list failed: {exc}")
+    objs.sort(key=lambda o: o.get("uploadedAt") or "", reverse=True)
+
+    async def summarize(o: dict[str, Any]) -> dict[str, Any]:
+        key = o.get("key", "")
+        rep: dict[str, Any] = {}
+        try:
+            raw = await asyncio.to_thread(insforge_storage.download_bytes, key)
+            rep = json.loads(raw)
+        except Exception:
+            rep = {}
+        notes = rep.get("doctorNotes") or {}
+        modified = bool(notes.get("assessment") or notes.get("plan") or notes.get("followUp"))
+        return {
+            "key": key,
+            "title": rep.get("title") or "Health Report",
+            "kind": rep.get("kind"),
+            "generatedAt": rep.get("generatedAt"),
+            "editedAt": notes.get("editedAt"),
+            "editedBy": notes.get("editedBy"),
+            "modified": modified,
+            "size": o.get("size"),
+            "uploadedAt": o.get("uploadedAt"),
+        }
+
+    records = await asyncio.gather(*(summarize(o) for o in objs[:20]))
+    return {"records": records}
+
+
+@router.get("/api/clinical/reports/record")
+async def get_record(key: str = Query(...)) -> dict[str, Any]:
+    """Fetch one saved report record by its storage key."""
+    if not key.startswith("records/"):
+        raise HTTPException(status_code=400, detail="invalid record key")
+    try:
+        raw = await asyncio.to_thread(insforge_storage.download_bytes, key)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"InsForge storage download failed: {exc}")
+    try:
+        return json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=502, detail="stored record is not valid JSON")
+
+
+class ReportEmailIn(BaseModel):
+    owner_id: str | None = Field(default=None, max_length=256)
+    title: str = Field(default="Health Report", max_length=200)
+    subtitle: str = Field(default="", max_length=1000)
+    pdf_base64: str = Field(min_length=1, max_length=11_000_000)
+    pdf_filename: str = Field(default="report.pdf", max_length=200)
+
+
+@router.post("/api/clinical/reports/email")
+async def email_report_pdf(body: ReportEmailIn) -> dict[str, Any]:
+    """Email the generated report PDF to the signed-in user's address."""
+    owner = body.owner_id or _active_session.get("owner_id") or "guest"
+    to = report_mailer.recipient_email(owner)
+    try:
+        pdf_bytes = base64.b64decode(body.pdf_base64, validate=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid pdf base64") from exc
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="attachment must be a PDF")
+    if not re.fullmatch(r"[^/\\\r\n]+\.pdf", body.pdf_filename, re.IGNORECASE):
+        raise HTTPException(status_code=400, detail="invalid PDF filename")
+    try:
+        await asyncio.to_thread(report_mailer.store_pdf, owner, body.title, pdf_bytes)
+    except Exception:
+        pass  # archiving is best-effort; the email itself must still go out
+    html = report_mailer.build_email_html(body.title, body.subtitle, True)
+    try:
+        return await asyncio.to_thread(
+            email_report.send_report_email,
+            to=to,
+            subject=body.title,
+            html=html,
+            pdf_base64=body.pdf_base64,
+            pdf_filename=body.pdf_filename,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Resend email failed: {exc}")
+
+
+@router.get("/api/clinical/reports/automation")
+async def get_report_automation() -> dict[str, Any]:
+    return {
+        "enabled": report_mailer.get_automation(),
+        "available": email_report.available(),
+        "default_email": email_report.default_email(),
+        "email": _active_session.get("email"),
+    }
+
+
+class AutomationIn(BaseModel):
+    enabled: bool
+
+
+@router.post("/api/clinical/reports/automation")
+async def set_report_automation(body: AutomationIn) -> dict[str, Any]:
+    return {"enabled": report_mailer.set_automation(body.enabled)}
+
+
+@router.post("/api/clinical/reports/send-weekly")
+async def send_weekly_now() -> dict[str, Any]:
+    """Manual trigger of the weekly report email (same path as the cron)."""
+    results = await asyncio.to_thread(report_mailer.send_weekly)
+    return {"results": results}
 
 
 @router.post("/api/clinical/whatsapp/webhook")

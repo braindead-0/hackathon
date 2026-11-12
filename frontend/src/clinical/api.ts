@@ -7,6 +7,56 @@ import type {
   PerformanceReport,
   ReplayStatus,
 } from "./types";
+import type { GeneratedReport } from "./reportGenerator";
+
+export interface ActiveSessionInput {
+  role: "doctor" | "patient" | null;
+  display_name: string | null;
+  patient_id: string | null;
+  clinician_id?: string | null;
+  email?: string | null;
+}
+
+export interface ActiveSessionResult {
+  ok: boolean;
+  owner_id: string;
+  email: string | null;
+}
+
+export interface ReportAutomation {
+  enabled: boolean;
+  available: boolean;
+  default_email: string;
+  /** Server-global active recipient; do not use as the current tab's identity. */
+  email: string | null;
+}
+
+export interface EmailReportInput {
+  owner_id: string;
+  title: string;
+  subtitle: string;
+  pdf_base64: string;
+  pdf_filename: string;
+}
+
+export interface EmailReportResult {
+  sent: boolean;
+  id?: string | null;
+  to?: string;
+  error?: string;
+}
+
+export interface RecordSummary {
+  key: string;
+  title: string;
+  kind: GeneratedReport["kind"] | null;
+  generatedAt: string | null;
+  editedAt: string | null;
+  editedBy: string | null;
+  modified: boolean;
+  size: number | null;
+  uploadedAt: string | null;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -53,7 +103,26 @@ export interface XgbComparison {
   should_use_both: string;
 }
 
+export interface MobileAlertResult {
+  event_id: string;
+  queued: boolean;
+  paired: number;
+  connected: number;
+}
+
+export interface MobilePairing {
+  code: string;
+  expires_in: number;
+  server_urls: string[];
+}
+
 export const clinicalApi = {
+  pairMobile: (patientId: string) =>
+    post<MobilePairing>("/api/clinical/mobile/pairings", { patient_id: patientId }),
+  mobileStatus: (patientId: string) =>
+    request<{ paired: number; connected: number }>(
+      `/api/clinical/mobile/patients/${encodeURIComponent(patientId)}/status`,
+    ),
   patients: () =>
     request<{ patients: PatientRow[]; disclaimer: string }>("/api/clinical/patients"),
   state: (id: string) => request<PatientStatePayload>(`/api/clinical/patients/${id}/state`),
@@ -87,10 +156,26 @@ export const clinicalApi = {
           error?: string;
         };
         xgboost?: XgbComparison;
+        mobile?: MobileAlertResult;
       }) | { scored: boolean }
     >(`/api/clinical/patients/${id}/readings`, reading),
   patientXgb: (id: string) =>
     request<XgbComparison>(`/api/clinical/patients/${id}/xgboost`),
+  storeReport: (body: { patient_id: string; title: string; html: string }) =>
+    post<{ bucket: string; key: string; url: string | null }>(
+      "/api/clinical/reports/store",
+      body,
+    ),
+  saveRecord: (body: { patient_id: string; report: unknown }) =>
+    post<{ bucket: string; key: string }>("/api/clinical/reports/record", body),
+  listRecords: (patientId: string) =>
+    request<{ records: RecordSummary[] }>(
+      `/api/clinical/reports/records?patient_id=${encodeURIComponent(patientId)}`,
+    ),
+  getRecord: (key: string) =>
+    request<GeneratedReport>(
+      `/api/clinical/reports/record?key=${encodeURIComponent(key)}`,
+    ),
   sendWhatsappReport: (body: {
     title: string;
     summary_text: string;
@@ -109,11 +194,14 @@ export const clinicalApi = {
       sids?: string[];
       error?: string;
     }>(`/api/clinical/whatsapp/${jobId}`),
-  setActiveSession: (body: {
-    role: string | null;
-    display_name: string | null;
-    patient_id: string | null;
-  }) => post<{ ok: boolean }>("/api/clinical/session/active", body),
+  setActiveSession: (body: ActiveSessionInput) =>
+    post<ActiveSessionResult>("/api/clinical/session/active", body),
+  emailReport: (body: EmailReportInput) =>
+    post<EmailReportResult>("/api/clinical/reports/email", body),
+  getReportAutomation: () =>
+    request<ReportAutomation>("/api/clinical/reports/automation"),
+  setReportAutomation: (body: { enabled: boolean }) =>
+    post<{ enabled: boolean }>("/api/clinical/reports/automation", body),
   askWhatsapp: (body: {
     question: string;
     send_to_whatsapp?: boolean;
@@ -167,3 +255,38 @@ export const METRIC_ORDER = [
 ] as const;
 
 export type Metric = (typeof METRIC_ORDER)[number];
+
+/** Resting reference ranges used to colour patient-facing vitals. */
+export const VITAL_RANGE: Record<string, [number, number]> = {
+  heart_rate: [60, 100],
+  spo2: [95, 100],
+  respiratory_rate: [12, 20],
+  temperature: [36.1, 37.2],
+  systolic_bp: [90, 140],
+  diastolic_bp: [60, 90],
+};
+
+export const VITAL_COLOR: Record<string, string> = {
+  heart_rate: "#e11d48",
+  spo2: "#0284c7",
+  respiratory_rate: "#0d9488",
+  temperature: "#d97706",
+  systolic_bp: "#7c3aed",
+  diastolic_bp: "#7c3aed",
+};
+
+export type VitalTone = "ok" | "high" | "low" | "absent";
+
+export function vitalStatus(
+  metric: string,
+  value: number | null | undefined,
+): { tone: VitalTone; label: string } {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return { tone: "absent", label: "Not reported" };
+  }
+  const range = VITAL_RANGE[metric];
+  if (!range) return { tone: "ok", label: "Recorded" };
+  if (value < range[0]) return { tone: "low", label: "Low" };
+  if (value > range[1]) return { tone: "high", label: "High" };
+  return { tone: "ok", label: "In range" };
+}

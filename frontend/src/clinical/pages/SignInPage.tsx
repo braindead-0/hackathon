@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { AuthSession } from "../auth";
+import { clinicalApi } from "../api";
 import type { PatientRow } from "../types";
 import { Panel, SCENARIO_LABEL, TIER_LABEL, TierBadge } from "../ui";
 
@@ -52,6 +53,26 @@ export function SignInPage({
   const [selectedPatientId, setSelectedPatientId] = useState("");
   const [patientPin, setPatientPin] = useState("1234");
   const [error, setError] = useState<string | null>(null);
+  const [doctorEmail, setDoctorEmail] = useState("");
+  const [patientEmail, setPatientEmail] = useState("");
+  const [defaultEmail, setDefaultEmail] = useState<string | null>(null);
+  const [emailSettingsError, setEmailSettingsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    clinicalApi.getReportAutomation()
+      .then((settings) => {
+        if (!cancelled) setDefaultEmail(settings.default_email);
+      })
+      .catch(() => {
+        if (!cancelled) setEmailSettingsError("Email settings unavailable. Leaving email blank uses the server-configured default recipient.");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const emailHint = emailSettingsError ?? (defaultEmail
+    ? `Optional. Leave blank to send report PDFs to ${defaultEmail} (server default).`
+    : "Loading the server's default email recipient…");
 
   const patientOptions = rows.length > 0 ? rows : FALLBACK_PATIENTS;
 
@@ -74,7 +95,7 @@ export function SignInPage({
       return;
     }
     setError(null);
-    onSignIn({ role: "doctor", clinicianName: name, clinicianId: id });
+    onSignIn({ role: "doctor", clinicianName: name, clinicianId: id, email: doctorEmail.trim() || undefined });
   };
 
   const handlePatientSubmit = (e: FormEvent) => {
@@ -93,6 +114,7 @@ export function SignInPage({
       role: "patient",
       patientId: match.patient_id,
       patientName: match.display_name,
+      email: patientEmail.trim() || undefined,
     });
   };
 
@@ -200,6 +222,19 @@ export function SignInPage({
                 />
               </label>
 
+              <label className="field">
+                <span className="field__label">Report email (optional)</span>
+                <input
+                  className="input"
+                  type="email"
+                  autoComplete="email"
+                  value={doctorEmail}
+                  onChange={(e) => setDoctorEmail(e.target.value)}
+                  aria-describedby="doctor-email-hint"
+                />
+                <span id="doctor-email-hint" className="small muted">{emailHint}</span>
+              </label>
+
               <div className="signin__features small muted">
                 Includes: 5-patient ward census · Personalized NEWS2 &amp; drift · Artifact
                 suppression log · HAPI FHIR explorer · Ward &amp; Patient PDF/MD reports
@@ -273,6 +308,19 @@ export function SignInPage({
                   onChange={(e) => setPatientPin(e.target.value)}
                   placeholder="1234"
                 />
+              </label>
+
+              <label className="field">
+                <span className="field__label">Report email (optional)</span>
+                <input
+                  className="input"
+                  type="email"
+                  autoComplete="email"
+                  value={patientEmail}
+                  onChange={(e) => setPatientEmail(e.target.value)}
+                  aria-describedby="patient-email-hint"
+                />
+                <span id="patient-email-hint" className="small muted">{emailHint}</span>
               </label>
 
               <div className="signin__features small muted">

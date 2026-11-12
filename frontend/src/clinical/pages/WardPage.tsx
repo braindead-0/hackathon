@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { AuthSession } from "../auth";
-import { ReportModal } from "../ReportModal";
-import { buildDoctorWardReport, type GeneratedReport } from "../reportGenerator";
+import { buildDoctorWardReport } from "../reportGenerator";
+import { ReportEmailStatus, useReportEmail } from "../reportEmail";
 import { ScenarioControls } from "../ScenarioControls";
 import { WardTable } from "../WardTable";
 import type { PatientRow, ReplayStatus, Tier } from "../types";
@@ -63,11 +63,11 @@ export function WardPage({
   rows: PatientRow[];
   replay: ReplayStatus | null;
   selected: string | null;
-  session?: Extract<AuthSession, { role: "doctor" }> | null;
+  session: Extract<AuthSession, { role: "doctor" }>;
   onSelect: (id: string) => void;
   onRefresh: () => void;
 }) {
-  const [report, setReport] = useState<GeneratedReport | null>(null);
+  const reportEmail = useReportEmail();
   const needingAttention = rows.filter(
     (r) => r.timestamp && r.alert_kind === "CLINICAL" && !r.suppressed && TIER_RANK[r.tier] > 0,
   ).length;
@@ -92,12 +92,15 @@ export function WardPage({
           <span className="chip chip--sensor">{suppressed} readings suppressed</span>
           <button
             className="btn btn--small btn--primary"
-            onClick={() => setReport(buildDoctorWardReport(rows, session))}
+            disabled={reportEmail.status.sending}
+            onClick={() => reportEmail.generate(buildDoctorWardReport(rows, session), session)}
           >
             Generate Ward Report
           </button>
         </div>
       </div>
+
+      <ReportEmailStatus status={reportEmail.status} />
 
       <TierCensus rows={rows} />
       <p className="small muted">
@@ -143,8 +146,6 @@ export function WardPage({
         {TIER_LABEL.REVIEW} = NEWS2 5–6 · {TIER_LABEL.URGENT} = NEWS2 ≥ 7. Sustained
         drift from the patient's own baseline escalates one tier above the aggregate.
       </p>
-
-      {report && <ReportModal report={report} onClose={() => setReport(null)} />}
     </div>
   );
 }

@@ -1,24 +1,26 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { clinicalApi } from "./api";
-import { ClinicalTwin3D } from "./ClinicalTwin3D";
-import { VitalsCharts } from "./VitalsCharts";
 import {
   buildDoctorPatientReport,
   buildPatientHealthReport,
-  deriveOrganFindings,
+  printReport,
   reportToHtml,
   reportToMarkdown,
+  type DoctorNotes,
   type GeneratedReport,
 } from "./reportGenerator";
-import { dateTime } from "./ui";
+
+const EMPTY_NOTES: DoctorNotes = { assessment: "", plan: "", followUp: "" };
 
 export function ReportModal({
   report,
   onClose,
+  onSaved,
 }: {
   report: GeneratedReport;
   onClose: () => void;
+  onSaved?: (key: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const [waPhone, setWaPhone] = useState("");
@@ -27,7 +29,10 @@ export function ReportModal({
   const [audience, setAudience] = useState<"doctor" | "patient">(
     report.kind === "patient-summary" ? "patient" : "doctor",
   );
-  const twinWrapRef = useRef<HTMLDivElement | null>(null);
+  const [notes, setNotes] = useState<DoctorNotes>(report.doctorNotes ?? EMPTY_NOTES);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [savedKey, setSavedKey] = useState<string | null>(report.recordKey ?? null);
 
   const activeReport = useMemo(() => {
     const vc = report.visualContext;
@@ -39,47 +44,59 @@ export function ReportModal({
   }, [audience, report]);
 
   const vc = activeReport.visualContext;
-  const findings = useMemo(
-    () =>
-      vc
-        ? deriveOrganFindings(vc.state, vc.liveOverride, activeReport.kind === "patient-summary")
-        : [],
-    [vc, activeReport.kind],
+  const patientId = vc?.state.patient_id ?? null;
+  const canEdit = audience === "doctor" && Boolean(patientId);
+  const clinicianLabel = vc?.session
+    ? `${vc.session.clinicianName} (${vc.session.clinicianId})`
+    : "Attending Clinician";
+
+  const displayReport = useMemo<GeneratedReport>(
+    () => ({ ...activeReport, doctorNotes: notes, recordKey: savedKey ?? report.recordKey }),
+    [activeReport, notes, savedKey, report.recordKey],
   );
-  const flaggedCount = findings.filter((f) => f.status !== "normal").length;
+
+  const storedOnce = useRef(false);
+  useEffect(() => {
+    if (!patientId || storedOnce.current) return;
+    storedOnce.current = true;
+    clinicalApi
+      .storeReport({
+        patient_id: patientId,
+        title: displayReport.title,
+        html: reportToHtml(displayReport),
+      })
+      .catch(() => {});
+  }, [patientId, displayReport]);
 
   const handleDownload = () => {
-    const md = reportToMarkdown(activeReport);
+    const md = reportToMarkdown(displayReport);
     const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = activeReport.filename;
+    a.download = displayReport.filename;
     a.click();
     URL.revokeObjectURL(url);
   };
 
   const handleDownloadHtml = () => {
-    let snapshot: string | null = null;
-    try {
-      const canvas = twinWrapRef.current?.querySelector("canvas");
-      if (canvas) snapshot = canvas.toDataURL("image/png");
-    } catch {
-      snapshot = null;
-    }
-    const html = reportToHtml(activeReport, snapshot);
+    const html = reportToHtml(displayReport);
     const blob = new Blob([html], { type: "text/html;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = activeReport.filename.replace(/\.md$/, ".html");
+    a.download = displayReport.filename.replace(/\.md$/, ".html");
     a.click();
     URL.revokeObjectURL(url);
   };
 
+  const handlePrint = () => {
+    printReport(displayReport);
+  };
+
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(reportToMarkdown(activeReport));
+      await navigator.clipboard.writeText(reportToMarkdown(displayReport));
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
@@ -87,13 +104,38 @@ export function ReportModal({
     }
   };
 
+  const handleSave = async () => {
+    if (!patientId) return;
+    setSaving(true);
+    setSaveStatus(null);
+    const stamped: DoctorNotes = {
+      ...notes,
+      editedBy: clinicianLabel,
+      editedAt: new Date().toISOString(),
+    };
+    try {
+      const res = await clinicalApi.saveRecord({
+        patient_id: patientId,
+        report: { ...activeReport, doctorNotes: stamped },
+      });
+      setNotes(stamped);
+      setSavedKey(res.key);
+      setSaveStatus("Saved to patient record.");
+      onSaved?.(res.key);
+    } catch (e) {
+      setSaveStatus(e instanceof Error ? e.message : "Failed to save report.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSendWhatsApp = async () => {
     setWaSending(true);
     setWaStatus("Sending report via WhatsApp...");
-    const summary = reportToMarkdown(activeReport).slice(0, 1400);
+    const summary = reportToMarkdown(displayReport).slice(0, 1400);
     try {
       const res = await clinicalApi.sendWhatsappReport({
-        title: activeReport.title,
+        title: displayReport.title,
         summary_text: summary,
         whatsapp_to: waPhone.trim() || null,
       });
@@ -119,25 +161,13 @@ export function ReportModal({
   };
 
   const mailtoHref = useMemo(() => {
-    const subject = encodeURIComponent(activeReport.title);
-    const body = encodeURIComponent(reportToMarkdown(activeReport).slice(0, 1800));
+    const subject = encodeURIComponent(displayReport.title);
+    const body = encodeURIComponent(reportToMarkdown(displayReport).slice(0, 1800));
     return `mailto:?subject=${subject}&body=${body}`;
-  }, [activeReport]);
-
-  const statusTone = !vc
-    ? "normal"
-    : vc.state.suppressed
-      ? "watch"
-      : vc.state.tier === "URGENT" || vc.state.tier === "REVIEW"
-        ? "anomalous"
-        : vc.state.tier === "WATCH"
-          ? "watch"
-          : flaggedCount > 0
-            ? "watch"
-            : "normal";
+  }, [displayReport]);
 
   return createPortal(
-    <div className="report-modal" role="dialog" aria-modal="true" aria-label={activeReport.title}>
+    <div className="report-modal" role="dialog" aria-modal="true" aria-label={displayReport.title}>
       <div className="report-modal__backdrop" onClick={onClose} />
       <div className="report-modal__dialog">
         <div className="report-modal__toolbar">
@@ -182,7 +212,7 @@ export function ReportModal({
                 type="tel"
                 className="input"
                 style={{ width: 140, padding: "5px 8px", fontSize: 12 }}
-                placeholder="WhatsApp # (or w.env)"
+                placeholder="WhatsApp # (or .env)"
                 value={waPhone}
                 onChange={(e) => setWaPhone(e.target.value)}
               />
@@ -194,7 +224,7 @@ export function ReportModal({
                 {waSending ? "Sending..." : "Send via WhatsApp"}
               </button>
             </div>
-            <button className="btn btn--small btn--primary" onClick={() => window.print()}>
+            <button className="btn btn--small btn--primary" onClick={handlePrint}>
               Print / Save PDF
             </button>
             <button className="btn btn--small" onClick={onClose} aria-label="Close report">
@@ -208,169 +238,68 @@ export function ReportModal({
           </div>
         )}
 
-        <article className="report-sheet">
-          <header className="report-sheet__header">
-            <div>
-              <div className="small muted" style={{ textTransform: "uppercase", letterSpacing: "0.06em" }}>
-                PS-03 Post-Discharge Monitor · {activeReport.kind === "patient-summary" ? "Patient Copy" : "Clinical Copy"}
-              </div>
-              <h2 className="report-sheet__title">{activeReport.title}</h2>
-              <p className="small muted" style={{ margin: "2px 0 0" }}>
-                {activeReport.subtitle}
-              </p>
-            </div>
-            <div className="report-sheet__meta">
-              <div>
-                <strong>Generated:</strong> {dateTime(activeReport.generatedAt)} UTC
-              </div>
-              <div>
-                <strong>Prepared:</strong> {activeReport.authorLabel}
-              </div>
-            </div>
-          </header>
+        <iframe
+          title={displayReport.title}
+          srcDoc={reportToHtml(displayReport)}
+          style={{
+            width: "100%",
+            height: "70vh",
+            border: "1px solid #cbd5e1",
+            borderRadius: 8,
+            background: "#fff",
+          }}
+        />
 
-          <div className="report-sheet__notice">{activeReport.disclaimer}</div>
-
-          {vc && (
-            <>
-              <div
-                className={`report-finding report-finding--${statusTone}`}
-                style={{
-                  marginBottom: 16,
-                  padding: "12px 16px",
-                  borderRadius: 10,
-                  borderLeftWidth: 5,
-                }}
-              >
-                <div className="spread" style={{ alignItems: "center", gap: 12 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                    <span
-                      style={{
-                        fontSize: 15,
-                        fontWeight: 700,
-                        color:
-                          statusTone === "anomalous"
-                            ? "#991b1b"
-                            : statusTone === "watch"
-                              ? "#92400e"
-                              : "#166534",
-                      }}
-                    >
-                      {vc.state.suppressed
-                        ? "Sensor Signal Unreliable — Clinical Scoring Withheld"
-                        : vc.state.tier === "URGENT" || vc.state.tier === "REVIEW"
-                          ? `Urgent Clinical Alert: ${flaggedCount > 0 ? `${flaggedCount} System${flaggedCount > 1 ? "s" : ""}` : "Patient"} Requiring Medical Attention`
-                          : flaggedCount > 0
-                            ? `${flaggedCount} Physiological System${flaggedCount > 1 ? "s" : ""} Flagged on 3D Twin`
-                            : "All Monitored Systems Within Expected Range"}
-                    </span>
-                  </div>
-                  <span className={`report-badge report-badge--${statusTone}`}>
-                    {vc.state.suppressed
-                      ? "SENSOR ARTIFACT"
-                      : `${vc.state.tier}${vc.state.news2 ? ` · NEWS2 ${vc.state.news2.total}` : ""}`}
+        {canEdit && (
+          <section className="report-sheet__section" style={{ borderTop: "2px solid #bcd3e6", paddingTop: 14 }}>
+            <div className="spread" style={{ alignItems: "center", marginBottom: 8 }}>
+              <h3 style={{ margin: 0, border: "none" }}>Clinician addendum (editable)</h3>
+              <div className="row row--tight" style={{ alignItems: "center", gap: 8 }}>
+                {saveStatus && (
+                  <span className="small" style={{ color: saveStatus.startsWith("Saved") ? "#166534" : "#991b1b" }}>
+                    {saveStatus}
                   </span>
-                </div>
-                <p style={{ margin: "8px 0 0", fontSize: 13, lineHeight: 1.55 }}>
-                  {vc.state.explanation?.narrative ??
-                    (activeReport.kind === "patient-summary"
-                      ? flaggedCount > 0
-                        ? "One or more vital signs are outside your normal target range. Review the highlighted 3D organs below and contact your clinical team."
-                        : "Your vital signs look steady relative to your personal post-discharge baseline."
-                      : "See 3D anatomical twin, baseline drift, and NEWS2 breakdown below.")}
-                </p>
+                )}
+                <button className="btn btn--small btn--primary" onClick={handleSave} disabled={saving}>
+                  {saving ? "Saving…" : savedKey ? "Save changes" : "Save to record"}
+                </button>
               </div>
-
-              <section className="report-sheet__section">
-                <div className="spread" style={{ alignItems: "baseline", marginBottom: 6 }}>
-                  <h3 style={{ margin: 0, border: "none" }}>
-                    3D Anatomical Twin &amp; Organ Breakdown
-                  </h3>
-                  <span className="small muted">
-                    {flaggedCount > 0
-                      ? `${flaggedCount} system${flaggedCount > 1 ? "s" : ""} flagged (highlighted in red/yellow)`
-                      : "all systems steady (green)"}
-                  </span>
-                </div>
-                <div className="report-twin-grid">
-                  <div className="report-twin-box" ref={twinWrapRef}>
-                    <ClinicalTwin3D
-                      state={vc.state}
-                      liveOverride={vc.liveOverride}
-                      height="400px"
-                    />
-                  </div>
-                  <div className="report-findings">
-                    {findings.map((f) => (
-                      <div key={f.organ} className={`report-finding report-finding--${f.status}`}>
-                        <div className="spread" style={{ alignItems: "center" }}>
-                          <strong>{f.organ}</strong>
-                          <span className={`report-badge report-badge--${f.status}`}>
-                            {f.status.toUpperCase()}
-                          </span>
-                        </div>
-                        <div className="small" style={{ marginTop: 4 }}>
-                          {f.metricLabel}: <strong>{f.valueText}</strong>{" "}
-                          <span className="muted">({f.baselineText})</span>
-                        </div>
-                        <p className="small" style={{ margin: "5px 0 0", color: "#475569" }}>
-                          {f.summary}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </section>
-
-              <section className="report-sheet__section">
-                <h3>Vital Sign Trend Graphs</h3>
-                <VitalsCharts
-                  readings={vc.readings}
-                  baselines={vc.state.baselines}
-                  untrustedMetrics={vc.state.artifact?.untrusted_metrics ?? []}
-                />
-              </section>
-            </>
-          )}
-
-          {activeReport.sections.map((sec) => (
-            <section className="report-sheet__section" key={sec.title}>
-              <h3>{sec.title}</h3>
-              {sec.paragraphs?.map((p, idx) => (
-                <p key={idx}>{p}</p>
-              ))}
-              {sec.bullets && sec.bullets.length > 0 && (
-                <ul>
-                  {sec.bullets.map((b, idx) => (
-                    <li key={idx}>{b}</li>
-                  ))}
-                </ul>
-              )}
-              {sec.table && sec.table.rows.length > 0 && (
-                <div className="table-wrap">
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        {sec.table.headers.map((h) => (
-                          <th key={h}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sec.table.rows.map((r, rIdx) => (
-                        <tr key={rIdx}>
-                          {r.map((cell, cIdx) => (
-                            <td key={cIdx}>{cell}</td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
-          ))}
-        </article>
+            </div>
+            <p className="small muted" style={{ marginTop: 0 }}>
+              Your assessment, plan, and follow-up are stored with this report and shown on the patient dashboard.
+            </p>
+            <label className="small" style={{ fontWeight: 600, display: "block", margin: "8px 0 4px" }}>
+              Assessment
+            </label>
+            <textarea
+              className="input"
+              rows={3}
+              placeholder="Clinical impression / interpretation of the flagged findings…"
+              value={notes.assessment}
+              onChange={(e) => setNotes((n) => ({ ...n, assessment: e.target.value }))}
+            />
+            <label className="small" style={{ fontWeight: 600, display: "block", margin: "8px 0 4px" }}>
+              Plan
+            </label>
+            <textarea
+              className="input"
+              rows={3}
+              placeholder="Management plan, medication changes, investigations…"
+              value={notes.plan}
+              onChange={(e) => setNotes((n) => ({ ...n, plan: e.target.value }))}
+            />
+            <label className="small" style={{ fontWeight: 600, display: "block", margin: "8px 0 4px" }}>
+              Follow-up
+            </label>
+            <textarea
+              className="input"
+              rows={2}
+              placeholder="Review interval, escalation criteria, next appointment…"
+              value={notes.followUp}
+              onChange={(e) => setNotes((n) => ({ ...n, followUp: e.target.value }))}
+            />
+          </section>
+        )}
       </div>
     </div>,
     document.body,

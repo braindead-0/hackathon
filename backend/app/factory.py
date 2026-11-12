@@ -11,8 +11,9 @@ import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import clinical, devices, replay, simulation, system, twins
+from backend.app.api import clinical, devices, mobile, replay, simulation, system, twins
 from backend.app.api.deps import Container
 from backend.app.config import Settings, get_settings
 from backend.app.db import Database
@@ -23,6 +24,7 @@ from backend.app.services.live import LiveRunner
 from backend.app.services.queries import QueryService
 from backend.app.services.replay import ReplayRunner
 from backend.app.services.report import ReportService
+from backend.app.services import report_mailer
 from backend.app.services.seed import DEFAULT_TWIN_ID, seed_database
 from backend.app.services.twin_service import TwinService
 
@@ -94,7 +96,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await container.replay.start()
             except Exception:
                 log.exception("could not autostart clinical replay")
+        weekly_task = asyncio.create_task(report_mailer.weekly_loop())
         yield
+        weekly_task.cancel()
         if container.replay is not None:
             await container.replay.stop()
             await container.replay.ingestion_client.aclose()
@@ -121,6 +125,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(devices.router)
     app.include_router(clinical.router)
     app.include_router(replay.router)
+    app.include_router(mobile.router)
+
+    mobile_www = Path(__file__).resolve().parents[3] / "vitaltrack" / "www"
+    if mobile_www.is_dir():
+        app.mount("/vitaltrack", StaticFiles(directory=mobile_www, html=True), name="vitaltrack")
 
     dist = Path(settings.frontend_dist)
     if dist.is_dir() and (dist / "index.html").exists():
@@ -132,8 +141,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return JSONResponse({"detail": "Not Found"}, status_code=404)
             candidate = (dist / path).resolve()
             if path and candidate.is_file() and dist.resolve() in candidate.parents:
-                return FileResponse(candidate)
-            return FileResponse(index)
+                cache = "public, max-age=31536000, immutable" if path.startswith("assets/") else "no-cache"
+                return FileResponse(candidate, headers={"Cache-Control": cache})
+            return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
     return app
 

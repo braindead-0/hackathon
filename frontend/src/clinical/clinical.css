@@ -396,20 +396,34 @@
 /* ---------------------------------------------------------------- vitals */
 .vitals {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
 }
 .vital {
   border: 1px solid var(--mist);
-  border-radius: 10px;
-  padding: 10px 12px;
+  border-radius: 12px;
+  padding: 12px 14px;
   background: var(--paper);
   min-width: 0;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.vital--high,
+.vital--low {
+  border-color: #e8c4c7;
+  background: #fffafa;
+  box-shadow: inset 3px 0 0 var(--alert);
+}
+.vital--high .vital__value,
+.vital--low .vital__value {
+  color: var(--alert);
 }
 .vital--untrusted {
   border-style: dashed;
   border-color: #ccd2ea;
   background: #f4f5fb;
+}
+.vital--untrusted .vital__value {
+  color: var(--sensor);
 }
 .vital--absent {
   opacity: 0.62;
@@ -422,20 +436,58 @@
   font-weight: 650;
   display: flex;
   align-items: center;
-  gap: 5px;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.vital__pill {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--porcelain);
+  color: var(--ink-soft);
+  border: 1px solid var(--mist);
+  white-space: nowrap;
+}
+.vital__pill--ok {
+  background: #eaf4ee;
+  color: var(--ok);
+  border-color: #cbe3d5;
+}
+.vital__pill--high,
+.vital__pill--low {
+  background: #fbecec;
+  color: var(--alert);
+  border-color: #e8c4c7;
+}
+.vital__pill--untrusted {
+  background: #eceef8;
+  color: var(--sensor);
+  border-color: #ccd2ea;
 }
 .vital__value {
-  font-size: 25px;
-  font-weight: 660;
+  font-size: 27px;
+  font-weight: 680;
   letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
   line-height: 1.25;
+  margin-top: 4px;
 }
 .vital__unit {
   font-size: 12px;
   font-weight: 540;
   color: var(--ink-soft);
   margin-left: 3px;
+}
+.vital__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 3px;
 }
 .vital__note {
   font-size: 11px;
@@ -444,6 +496,49 @@
 .vital__note--warn {
   color: var(--sensor);
   font-weight: 600;
+}
+.vital__code {
+  font-size: 9.5px;
+  padding: 0 4px;
+}
+
+/* ------------------------------------------------------- vital trend cards */
+.vchart {
+  margin: 0;
+  min-width: 0;
+  border: 1px solid var(--mist);
+  border-radius: 12px;
+  background: var(--clinical-paper);
+  padding: 12px 14px 8px;
+  box-shadow: var(--shadow);
+}
+.vchart__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.vchart__name {
+  font-size: 12.5px;
+  font-weight: 640;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.vchart__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.vchart__latest {
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.vchart__sub {
+  font-size: 10.5px;
+  margin: 2px 0 6px;
 }
 
 /* ------------------------------------------------------------------ alerts */

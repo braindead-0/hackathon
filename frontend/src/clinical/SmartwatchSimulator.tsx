@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { WatchLiveOverride } from "./ClinicalTwin3D";
-import { clinicalApi, type XgbComparison } from "./api";
+import { clinicalApi, type MobileAlertResult, type XgbComparison } from "./api";
+import { MobileAlertPairing } from "./MobileAlertPairing";
 import type { MonitorResult, PatientStatePayload } from "./types";
 import { TIER_LABEL } from "./ui";
 
@@ -51,6 +52,7 @@ export function SmartwatchSimulator({
         error?: string;
       };
       xgboost?: XgbComparison;
+      mobile?: MobileAlertResult;
     }) | null
   >(null);
   const [xgbComp, setXgbComp] = useState<XgbComparison | null>(null);
@@ -95,7 +97,7 @@ export function SmartwatchSimulator({
         ? `Sensor check: ${lastResult.artifact.reasons[0] ?? "Unreliable signal suppressed"}`
         : lastResult.tier === "NORMAL"
           ? "Vitals normal · No alert sent"
-          : `${TIER_LABEL[lastResult.tier]} alert sent to care team`
+          : `${TIER_LABEL[lastResult.tier]} · ${lastResult.whatsapp ? "notifications queued" : "notifications not requested"}`
       : state.timestamp
         ? `Latest: ${isSensor ? "Sensor check" : TIER_LABEL[state.tier]}`
         : "Connected · Adjust & send";
@@ -259,6 +261,8 @@ export function SmartwatchSimulator({
           </button>
         </div>
 
+        <MobileAlertPairing key={patientId} patientId={patientId} />
+
         <div>
           <div className="spread" style={{ marginBottom: 6, gap: 8 }}>
             <span className="small muted" style={{ fontWeight: 600 }}>
@@ -374,7 +378,7 @@ export function SmartwatchSimulator({
               checked={sendWhatsapp}
               onChange={(e) => setSendWhatsapp(e.target.checked)}
             />
-            Send WhatsApp alert on abnormal reading
+            Send WhatsApp, Telegram and VitalTrack alerts on abnormal reading
           </label>
           {sendWhatsapp && (
             <input
@@ -383,7 +387,7 @@ export function SmartwatchSimulator({
               type="text"
               value={whatsappTo}
               onChange={(e) => setWhatsappTo(e.target.value)}
-              placeholder="Phone (blank = default in w.env)"
+              placeholder="Phone (blank = configured default)"
               aria-label="WhatsApp recipient phone number"
             />
           )}
@@ -429,6 +433,15 @@ export function SmartwatchSimulator({
               ? lastResult.artifact.reasons.join("; ") || "Sensor issue detected; clinical alert withheld."
               : lastResult.explanation?.narrative ??
                 `NEWS2 score ${lastResult.news2?.total ?? "—"} (${lastResult.news2?.risk_level ?? "scored"}).`}
+            {lastResult.mobile && (
+              <div className="small" style={{ marginTop: 6 }}>
+                {lastResult.mobile.connected > 0
+                  ? "VitalTrack alert queued with the messages — the connected phone receives it on its next sync."
+                  : lastResult.mobile.paired > 0
+                    ? "VitalTrack phone offline — reopen the app within 2 minutes to receive this alert."
+                    : "No VitalTrack phone paired — pair above to receive ringtone and vibration alerts."}
+              </div>
+            )}
             {lastResult.whatsapp && (
               <div className="small" style={{ marginTop: 6, fontWeight: 600 }}>
                 {lastResult.whatsapp.queued

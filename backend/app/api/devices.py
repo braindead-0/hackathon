@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ipaddress
-import os
 import socket
 from typing import Any
 
@@ -15,6 +14,7 @@ from fastapi.responses import FileResponse
 from backend.app.api.deps import Container, get_container
 from backend.app.config import REPO_ROOT
 from backend.app.services.devices import ClaimIn, DeviceAuthError, DeviceSyncIn, PairingIn
+from backend.app.services.envconf import get as env_get
 from backend.app.services.twin_service import TwinNotFoundError
 
 router = APIRouter(prefix="/api", tags=["phone"])
@@ -52,7 +52,7 @@ def lan_addresses() -> list[str]:
 
 
 def _port(request: Request) -> int:
-    env = os.environ.get("DHT_PUBLIC_PORT")
+    env = env_get("DHT_PUBLIC_PORT")
     if env and env.isdigit():
         return int(env)
     return request.url.port or (443 if request.url.scheme == "https" else 80)
@@ -72,7 +72,7 @@ def is_public(request: Request) -> bool:
 
 
 def server_urls(request: Request) -> list[str]:
-    public = os.environ.get("DHT_PUBLIC_URL", "").strip().rstrip("/")
+    public = env_get("DHT_PUBLIC_URL").rstrip("/")
     if public:  # set explicitly (Docker on a laptop, or a deployment)
         return [public]
     host = request.url.hostname or ""
@@ -84,7 +84,7 @@ def server_urls(request: Request) -> list[str]:
         return [f"{scheme}://{host}" if default else f"{scheme}://{host}:{port}"]
     port = _port(request)
     # In development the page is served by Vite (5173); the phone must talk to the API port.
-    if port == 5173:
+    if port in (5173, 5174):
         port = 8000
     urls = [f"http://{ip}:{port}" for ip in lan_addresses()]
     if host and host not in ("localhost", "127.0.0.1") and not any(host in u for u in urls):
@@ -97,7 +97,7 @@ def network(request: Request) -> dict[str, Any]:
     return {
         "server_urls": server_urls(request),
         "port": _port(request),
-        "public": is_public(request) or bool(os.environ.get("DHT_PUBLIC_URL")),
+        "public": is_public(request) or bool(env_get("DHT_PUBLIC_URL")),
         "apk_available": apk_path() is not None,
     }
 

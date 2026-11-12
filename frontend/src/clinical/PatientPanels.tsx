@@ -1,4 +1,4 @@
-import { LOINC, METRIC_ORDER } from "./api";
+import { LOINC, METRIC_ORDER, VITAL_RANGE, vitalStatus } from "./api";
 import type {
   ArtifactVerdict,
   DischargeProfile,
@@ -23,28 +23,33 @@ export function VitalsStrip({
         const meta = LOINC[metric];
         const value = observation[metric];
         const bad = untrusted.includes(metric);
-        const absent = value === null || value === undefined;
+        const status = vitalStatus(metric, value);
+        const absent = status.tone === "absent";
+        const range = VITAL_RANGE[metric];
+        const tone = bad ? "untrusted" : status.tone;
         return (
-          <div
-            key={metric}
-            className={`vital${bad ? " vital--untrusted" : ""}${absent ? " vital--absent" : ""}`}
-          >
+          <div key={metric} className={`vital vital--${tone}`}>
             <div className="vital__label">
-              {meta.label}
-              <span className="code" style={{ fontSize: 9.5, padding: "0 3px" }}>
-                {meta.code}
+              <span className="vital__name">{meta.label}</span>
+              <span className={`vital__pill vital__pill--${tone}`}>
+                {bad ? "Sensor fault" : status.label}
               </span>
             </div>
             <div className="vital__value">
               {absent ? "—" : num(value, metric === "temperature" ? 2 : 1)}
               {!absent && <span className="vital__unit">{meta.unit}</span>}
             </div>
-            <div className={`vital__note${bad ? " vital__note--warn" : ""}`}>
-              {bad
-                ? "withheld — sensor fault"
-                : absent
-                  ? "not reported"
-                  : `LOINC ${meta.code}`}
+            <div className="vital__foot">
+              <span className={`vital__note${bad ? " vital__note--warn" : ""}`}>
+                {bad
+                  ? "withheld — sensor fault"
+                  : absent
+                    ? "not reported"
+                    : range
+                      ? `Normal ${range[0]}–${range[1]} ${meta.unit}`
+                      : "recorded"}
+              </span>
+              <span className="code vital__code">{meta.code}</span>
             </div>
           </div>
         );
