@@ -7,7 +7,6 @@ import { ReportModal } from "../ReportModal";
 import { SavedReportsPanel } from "../SavedReports";
 import { buildDoctorPatientReport, reportToHtml, type GeneratedReport } from "../reportGenerator";
 import { clinicalApi } from "../api";
-import { ReportEmailStatus, useReportEmail } from "../reportEmail";
 import {
   DriftPanel,
   News2Breakdown,
@@ -36,7 +35,6 @@ export function PatientPage({
   const [report, setReport] = useState<GeneratedReport | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
   const [savedRefresh, setSavedRefresh] = useState(0);
-  const reportEmail = useReportEmail();
 
   useEffect(() => {
     setAlertFilter("clinical");
@@ -67,10 +65,17 @@ export function PatientPage({
       ? deviceAlerts
       : alerts;
 
+  const headTone =
+    state.alert_kind && state.alert_kind !== "CLINICAL"
+      ? "sensor"
+      : state.timestamp
+        ? state.tier.toLowerCase()
+        : "pending";
+
   return (
     <div className="col">
-      <div className="spread">
-        <div className="row row--tight" style={{ alignItems: "center" }}>
+      <section className={`patient-head patient-head--${headTone}`}>
+        <div className="patient-head__identity">
           <button className="btn btn--small" onClick={onBack}>
             ← Ward
           </button>
@@ -83,26 +88,63 @@ export function PatientPage({
             </p>
           </div>
         </div>
-        <div className="row row--tight" style={{ alignItems: "center" }}>
-          {state.timestamp ? (
-            <TierBadge tier={state.tier} kind={state.alert_kind} large />
-          ) : (
-            <span className="pill">Awaiting first reading</span>
+
+        <div className="patient-head__actions">
+          <button
+            className="btn btn--small btn--primary"
+            onClick={() => {
+              const generated = buildDoctorPatientReport(state, alerts, readings, session);
+              setReport(generated);
+              setReportOpen(true);
+              clinicalApi.storeReport({ patient_id: patientId, title: generated.title, html: reportToHtml(generated) })
+                .then(() => setSavedRefresh((value) => value + 1))
+                .catch(() => {});
+            }}
+          >
+            Generate Clinical Report
+          </button>
+          {report && (
+            <button className="btn btn--small" onClick={() => setReportOpen(true)}>
+              Review last report
+            </button>
           )}
-          <span className="row row--tight" style={{ alignItems: "center" }}>
-            <Score value={state.news2?.total ?? null} big />
-            <span className="small muted">
-              NEWS2
-              <br />
-              {state.news2?.risk_level ?? "not scored"}
-            </span>
-          </span>
-          <span className={`pill pill--${connection === "live" ? "live" : "off"}`}>
-            <span className="pill__dot" aria-hidden />
-            {connection === "live" ? "Live" : connection === "offline" ? "Reconnecting" : "Connecting"}
-          </span>
+          <button className="btn btn--small" onClick={() => onOpenFhir(patientId)}>
+            Stored FHIR
+          </button>
         </div>
-      </div>
+
+        <div className="patient-head__stats">
+          <div className="patient-stat">
+            <span className="patient-stat__label">Current status</span>
+            {state.timestamp ? (
+              <TierBadge tier={state.tier} kind={state.alert_kind} large />
+            ) : (
+              <span className="pill">Awaiting first reading</span>
+            )}
+          </div>
+          <div className="patient-stat">
+            <span className="patient-stat__label">NEWS2</span>
+            <span className="patient-stat__value">
+              <Score value={state.news2?.total ?? null} big />
+              <span className="small muted">{state.news2?.risk_level ?? "not scored"}</span>
+            </span>
+          </div>
+          <div className="patient-stat">
+            <span className="patient-stat__label">Stream</span>
+            <span className={`pill pill--${connection === "live" ? "live" : "off"}`}>
+              <span className="pill__dot" aria-hidden />
+              {connection === "live" ? "Live" : connection === "offline" ? "Reconnecting" : "Connecting"}
+            </span>
+          </div>
+          <div className="patient-stat patient-stat--stored">
+            <span className="patient-stat__label">FHIR observations</span>
+            <span className="patient-stat__value">
+              <strong>{state.stored_observations.toLocaleString()}</strong>
+              <span className="small muted">LOINC-coded</span>
+            </span>
+          </div>
+        </div>
+      </section>
 
       {error && (
         <div className="notice notice--warn" role="status">
@@ -118,52 +160,72 @@ export function PatientPage({
         </div>
       )}
 
-      <Panel
-        title="Latest vitals"
-        hint={state.timestamp ? `${dateTime(state.timestamp)} UTC` : "no reading yet"}
-        action={
-          <div className="row row--tight">
-            <button
-              className="btn btn--small btn--primary"
-              disabled={reportEmail.status.sending}
-              onClick={() => {
-                const generated = buildDoctorPatientReport(state, alerts, readings, session);
-                reportEmail.generate(generated, session);
-                setReport(generated);
-                clinicalApi.storeReport({ patient_id: patientId, title: generated.title, html: reportToHtml(generated) })
-                  .then(() => setSavedRefresh((value) => value + 1))
-                  .catch(() => {});
-              }}
-            >
-              Generate Clinical Report
-            </button>
-            {report && (
-              <button className="btn btn--small" onClick={() => setReportOpen(true)}>
-                Review / edit last report
-              </button>
+      <div className="patient-top">
+        <div className="col patient-top__left">
+          <Panel
+            title="Latest vitals"
+            hint={state.timestamp ? `${dateTime(state.timestamp)} UTC` : "no reading yet"}
+          >
+            <VitalsStrip observation={state.observation} untrusted={untrusted} />
+            <p className="small muted" style={{ marginTop: 10, marginBottom: 0 }}>
+              A missing mandated vital is recorded as{" "}
+              <span className="code">dataAbsentReason</span>, never as a zero. Untrusted
+              channels stay visible but are withheld from scoring.
+            </p>
+          </Panel>
+
+          <Panel
+            title="Why this tier"
+            hint={state.explanation ? "rule-based explanation of the latest reading" : "no scored reading yet"}
+          >
+            {state.explanation ? (
+              <div className="explain">
+                <p className="explain__narrative">{state.explanation.narrative}</p>
+                {state.explanation.readings.length > 0 && (
+                  <ul className="explain__list">
+                    {state.explanation.readings.map((reading) => (
+                      <li key={`${reading.metric}-${reading.band}`} className="explain__row">
+                        <span className="explain__metric">{reading.label}</span>
+                        <span className="explain__value">
+                          {reading.value ?? "—"}
+                          {reading.unit && <small> {reading.unit}</small>}
+                        </span>
+                        <span className="explain__band">{reading.band}</span>
+                        <span
+                          className={`explain__points${reading.news2_points > 0 ? " explain__points--on" : ""}`}
+                          title={`NEWS2 points: ${reading.news2_points}`}
+                        >
+                          {reading.news2_points}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {state.explanation.profile_facts.length > 0 && (
+                  <p className="explain__facts">
+                    <strong>Applied to this patient:</strong>{" "}
+                    {state.explanation.profile_facts.join(" · ")}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <Empty>
+                {state.suppressed
+                  ? "Clinical scoring was withheld for the latest reading because the device signal was unreliable."
+                  : "No scored reading yet — connect the wearable or start a replay from the ward."}
+              </Empty>
             )}
-            <button className="btn btn--small" onClick={() => onOpenFhir(patientId)}>
-              View stored FHIR
-            </button>
-          </div>
-        }
-      >
-        <VitalsStrip observation={state.observation} untrusted={untrusted} />
-        <p className="small muted" style={{ marginTop: 10 }}>
-          {state.stored_observations.toLocaleString()} LOINC-coded Observations stored in
-          HAPI for this patient. A missing mandated vital is recorded as{" "}
-          <span className="code">dataAbsentReason</span>, never as a zero.
-        </p>
-      </Panel>
+          </Panel>
+        </div>
 
-      <ReportEmailStatus status={reportEmail.status} />
-
-      <Panel
-        title="3D Digital Twin"
-        hint="Live anatomical model driven by this patient's latest vitals & alert tier"
-      >
-        <ClinicalTwin3D state={state} height="420px" />
-      </Panel>
+        <Panel
+          title="3D Digital Twin"
+          hint="live anatomy driven by this patient's vitals & alert tier"
+          className="patient-top__twin"
+        >
+          <ClinicalTwin3D state={state} height="480px" />
+        </Panel>
+      </div>
 
       <div className="grid grid--sidebar">
         <div className="col">
@@ -276,6 +338,7 @@ export function PatientPage({
       {report && reportOpen && (
         <ReportModal
           report={report}
+          session={session}
           onClose={() => setReportOpen(false)}
           onSaved={() => setSavedRefresh((v) => v + 1)}
         />

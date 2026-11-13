@@ -8,6 +8,7 @@ import pytest
 
 from backend.app.api import clinical, mobile
 from backend.app.api.deps import get_container
+from backend.app.services import report_mailer
 from backend.app.services.mobile_alerts import MobileAlerts, MobileAuthError, MobileRateLimit
 
 
@@ -83,7 +84,9 @@ def test_pairing_expiration_replacement_and_rate_limit(monkeypatch):
 
 
 @pytest.fixture
-def mobile_client(monkeypatch):
+def mobile_client(monkeypatch, tmp_path):
+    monkeypatch.setattr(report_mailer, "STATE_FILE", tmp_path / "alert_state.json")
+    monkeypatch.setattr(report_mailer, "default_alert_phone", lambda: None)
     patient = SimpleNamespace(
         profile=SimpleNamespace(patient_id="a", display_name="Test Patient"),
         last_processed=None, stored_observations=0,
@@ -190,3 +193,250 @@ def test_mobile_routes_require_token_and_scope_patient(mobile_client):
     assert client.get("/api/clinical/mobile/feed?after=-1", headers=headers).status_code == 422
     assert client.delete("/api/clinical/mobile/connection", headers=headers).status_code == 200
     assert client.get("/api/clinical/mobile/feed", headers=headers).status_code == 401
+
+
+def test_urgent_alert_notifies_patient_and_clinician(mobile_client):
+    client, service, result, wa, tg = mobile_client
+    calls = []
+
+    def fake_wa(**kwargs):
+        calls.append(kwargs)
+        return {"sent": True, "recipients": [kwargs.get("recipient_override") or "doctor"]}
+
+    wa.side_effect = fake_wa
+    response = client.post("/api/clinical/patients/a/readings", json={
+        "timestamp": "2026-11-13T10:00:00Z", "heart_rate": 148, "spo2": 84,
+        "respiratory_rate": 28, "temperature": 37.3,
+        "source": "smartwatch_demo", "send_whatsapp": True,
+        "whatsapp_to": "+910000000001",
+    })
+    job = client.get(f"/api/clinical/whatsapp/{response.json()['whatsapp']['job_id']}").json()
+    assert job["sent"] is True
+    assert job["patient"]["sent"] is True
+    assert job["telegram"]["sent"] is True
+    assert sorted(c["audience"] for c in calls) == ["clinician", "patient"]
+    patient_call = next(c for c in calls if c["audience"] == "patient")
+    clinician_call = next(c for c in calls if c["audience"] == "clinician")
+    assert patient_call["recipient_override"] == "+910000000001"
+    assert clinician_call.get("recipient_override") is None
+
+
+def test_clinician_alert_phone_setting_round_trip(monkeypatch, tmp_path):
+    monkeypatch.setattr(report_mailer, "STATE_FILE", tmp_path / "alert_state.json")
+    app = FastAPI()
+    app.include_router(clinical.router)
+    with TestClient(app) as client:
+        initial = client.get(
+            "/api/clinical/settings/alert-phone",
+            params={"clinician_id": "dr-a", "display_name": "Dr. Rao"},
+        ).json()
+        assert initial["phone"] is None
+        assert isinstance(initial["default_phone"], (str, type(None)))
+        assert isinstance(initial["fallback_configured"], bool)
+        rejected = client.post("/api/clinical/settings/alert-phone", json={
+            "clinician_id": "dr-a", "phone": "not-a-number",
+        })
+        assert rejected.status_code == 422
+        saved = client.post("/api/clinical/settings/alert-phone", json={
+            "clinician_id": "dr-a", "display_name": "Dr. Rao", "phone": "+91 90000 00009",
+        }).json()
+        assert saved["phone"] == "+919000000009"
+        assert client.get(
+            "/api/clinical/settings/alert-phone", params={"clinician_id": "dr-a"},
+        ).json()["phone"] == "+919000000009"
+        cleared = client.post("/api/clinical/settings/alert-phone", json={
+            "clinician_id": "dr-a", "phone": "",
+        }).json()
+        assert cleared["phone"] is None
+
+
+def test_alert_profile_with_emergency_contacts_round_trip(monkeypatch, tmp_path):
+    monkeypatch.setattr(report_mailer, "STATE_FILE", tmp_path / "alert_state.json")
+    app = FastAPI()
+    app.include_router(clinical.router)
+    with TestClient(app) as client:
+        missing_phone = client.post("/api/clinical/settings/alert-profile", json={
+            "role": "doctor", "clinician_id": "dr-a",
+            "contacts": [{"name": "Ravi Rao", "relation": "Spouse", "phone": ""}],
+        })
+        assert missing_phone.status_code == 422
+        bad_email = client.post("/api/clinical/settings/alert-profile", json={
+            "role": "doctor", "clinician_id": "dr-a", "email": "not-an-email",
+        })
+        assert bad_email.status_code == 422
+        saved = client.post("/api/clinical/settings/alert-profile", json={
+            "role": "doctor", "clinician_id": "dr-a", "display_name": "Dr. Rao",
+            "name": "Dr. Asha Rao", "email": "asha@example.com", "phone": "+91 90000 00009",
+            "contacts": [
+                {"name": "Ravi Rao", "relation": "Spouse", "phone": "+91 90000 00010"},
+                {"name": "Ravi Rao", "relation": "Spouse", "phone": "+919000000010"},
+            ],
+        })
+        assert saved.status_code == 200
+        data = saved.json()
+        assert data["phone"] == "+919000000009"
+        assert data["email"] == "asha@example.com"
+        assert data["contacts"] == [
+            {"name": "Ravi Rao", "relation": "Spouse", "phone": "+919000000010"},
+        ]
+        fetched = client.get(
+            "/api/clinical/settings/alert-profile", params={"role": "doctor", "clinician_id": "dr-a"},
+        ).json()
+        assert fetched["name"] == "Dr. Asha Rao"
+        assert fetched["contacts"][0]["phone"] == "+919000000010"
+        assert fetched["max_contacts"] == report_mailer.MAX_EMERGENCY_CONTACTS
+
+
+def test_urgent_alert_messages_emergency_contacts(mobile_client):
+    client, _, _, wa, _ = mobile_client
+    report_mailer.set_alert_profile(
+        "doctor:dr-a", name="Dr. Asha Rao", phone="+919000000009",
+        contacts=[{"name": "Ravi Rao", "relation": "Spouse", "phone": "+919000000010"}],
+    )
+    report_mailer.set_alert_profile(
+        "patient:a", name="Test Patient", phone="+910000000001",
+        contacts=[{"name": "Meera Rao", "relation": "Daughter", "phone": "+919000000011"}],
+    )
+    calls = []
+
+    def fake_wa(**kwargs):
+        calls.append(kwargs)
+        return {"sent": True}
+
+    wa.side_effect = fake_wa
+    response = post_reading(client)
+    assert response.status_code == 200
+    job = client.get(f"/api/clinical/whatsapp/{response.json()['whatsapp']['job_id']}").json()
+    assert set(job["contacts"]) == {"+919000000010", "+919000000011"}
+    family = [c for c in calls if c["audience"] == "family"]
+    assert {c["recipient_override"] for c in family} == {"+919000000010", "+919000000011"}
+    assert {c["contact_name"] for c in family} == {"Ravi Rao", "Meera Rao"}
+    # the clinician and patient numbers are never duplicated by a contact entry
+    assert len([c for c in calls if c["audience"] == "clinician"]) == 1
+    assert len([c for c in calls if c["audience"] == "patient"]) == 1
+
+
+def test_urgent_alert_routes_clinician_to_saved_phone(mobile_client):
+    client, _, _, wa, _ = mobile_client
+    report_mailer.set_alert_phone("doctor:dr-a", "+919000000009")
+    calls = []
+
+    def fake_wa(**kwargs):
+        calls.append(kwargs)
+        return {"sent": True}
+
+    wa.side_effect = fake_wa
+    response = post_reading(client)
+    assert response.status_code == 200
+    clinician_call = next(c for c in calls if c["audience"] == "clinician")
+    assert clinician_call["recipient_override"] == "+919000000009"
+
+
+def test_urgent_alert_falls_back_to_server_default_clinician_phone(mobile_client, monkeypatch):
+    client, _, _, wa, _ = mobile_client
+    monkeypatch.setattr(report_mailer, "default_alert_phone", lambda: "+919483113397")
+    calls = []
+
+    def fake_wa(**kwargs):
+        calls.append(kwargs)
+        return {"sent": True}
+
+    wa.side_effect = fake_wa
+    assert post_reading(client).status_code == 200
+    clinician_call = next(c for c in calls if c["audience"] == "clinician")
+    assert clinician_call["recipient_override"] == "+919483113397"
+
+
+def test_urgent_alert_template_for_patient_and_clinician():
+    from backend.app.services.whatsapp import format_alert
+
+    kwargs = dict(
+        patient_name="Todd Carlton Grant", patient_id="p-todd", tier="URGENT",
+        news2_total=9, risk_level="HIGH RISK",
+        vitals={"respiratory_rate": 28, "heart_rate": 158, "spo2": 84, "temperature": 37.3},
+        narrative="Respiratory rate and pulse are climbing while oxygen is falling.",
+    )
+    patient = format_alert(**kwargs, audience="patient")
+    assert patient.startswith("⚠️ VITALTWIN | URGENT HEALTH ALERT")
+    assert "Hello Todd," in patient
+    assert "📊 Current Health Readings" in patient
+    assert "• Respiratory Rate: 28 breaths/min (High)" in patient
+    assert "• Heart Rate: 158 bpm (Critically High)" in patient
+    assert "• SpO₂: 84% (Critically Low)" in patient
+    assert "🚨 NEWS2 Score: 9 — HIGH RISK" in patient
+    assert "Immediate Action Required" in patient
+    assert "— VitalTwin Clinical Care Team" in patient
+
+    clinician = format_alert(**kwargs, audience="clinician")
+    assert clinician.startswith("⚠️ VITALTWIN | URGENT CLINICAL ALERT")
+    assert "Patient: Todd Carlton Grant (p-todd)" in clinician
+    assert "📊 Current Readings" in clinician
+    assert "🚨 NEWS2 Score: 9 — HIGH RISK" in clinician
+    assert "Review immediately and escalate per local protocol." in clinician
+
+    family = format_alert(**kwargs, audience="family", contact_name="Meera Grant")
+    assert family.startswith("⚠️ VITALTWIN | URGENT EMERGENCY ALERT")
+    assert "Hello Meera Grant," in family
+    assert "About: Todd Carlton Grant" in family
+    assert "p-todd" not in family
+    assert "You are listed as an emergency contact." in family
+    assert "🚨 NEWS2 Score: 9 — HIGH RISK" in family
+    assert "— VitalTwin Clinical Care Team" in family
+
+
+def test_saving_report_uses_saved_clinician_phone(monkeypatch, tmp_path):
+    monkeypatch.setattr(report_mailer, "STATE_FILE", tmp_path / "alert_state.json")
+    monkeypatch.setattr(report_mailer, "default_alert_phone", lambda: None)
+    monkeypatch.setattr(clinical, "_patient_contacts", {})
+    sent: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(clinical.insforge_storage, "upload_bytes", lambda *a, **k: {"url": None})
+    monkeypatch.setattr(
+        clinical, "send_whatsapp_text",
+        lambda text, to=None: sent.append(("wa", to)) or {"sent": True},
+    )
+    monkeypatch.setattr(clinical, "send_telegram_text", lambda text: {"sent": True})
+    report_mailer.set_alert_phone("doctor:dr-a", "+919000000009")
+    service = SimpleNamespace(patient=lambda patient_id: SimpleNamespace(
+        profile=SimpleNamespace(display_name="Test Patient"),
+    ))
+    app = FastAPI()
+    app.include_router(clinical.router)
+    app.dependency_overrides[get_container] = lambda: SimpleNamespace(clinical=service)
+    with TestClient(app) as client:
+        response = client.post("/api/clinical/reports/record", json={
+            "patient_id": "p1", "clinician_id": "dr-a",
+            "report": {"title": "Clinical Report", "doctorNotes": {"editedBy": "Dr. Rao"}},
+        })
+    assert response.status_code == 200
+    assert {to for _, to in sent} == {"+919000000009"}
+
+
+def test_saving_report_notifies_patient_and_clinician(monkeypatch, tmp_path):
+    monkeypatch.setattr(report_mailer, "STATE_FILE", tmp_path / "alert_state.json")
+    monkeypatch.setattr(report_mailer, "default_alert_phone", lambda: None)
+    sent: list[tuple[str, str | None]] = []
+    monkeypatch.setitem(clinical._patient_contacts, "p1", "+910000000002")
+    monkeypatch.setattr(clinical.insforge_storage, "upload_bytes", lambda *a, **k: {"url": None})
+    monkeypatch.setattr(
+        clinical, "send_whatsapp_text",
+        lambda text, to=None: sent.append(("wa", to)) or {"sent": True},
+    )
+    monkeypatch.setattr(clinical, "send_telegram_text", lambda text: {"sent": True})
+
+    patient = SimpleNamespace(profile=SimpleNamespace(display_name="Test Patient"))
+    service = SimpleNamespace(patient=lambda patient_id: patient)
+    app = FastAPI()
+    app.include_router(clinical.router)
+    app.dependency_overrides[get_container] = lambda: SimpleNamespace(clinical=service)
+
+    with TestClient(app) as client:
+        response = client.post("/api/clinical/reports/record", json={
+            "patient_id": "p1",
+            "report": {"title": "Clinical Report", "doctorNotes": {"editedBy": "Dr. Rao"}},
+            "patient_summary": "# Summary\n- **Oxygen** is low at 90.2%.",
+        })
+    assert response.status_code == 200
+    notified = response.json()["notified"]
+    assert notified["patient"]["sent"] is True
+    assert notified["clinician"]["sent"] is True
+    assert sorted("patient" if to else "clinician" for _, to in sent) == ["clinician", "patient"]

@@ -1,69 +1,210 @@
 import { useEffect, useState } from "react";
 import { ClinicalTwin3D, type WatchLiveOverride } from "../ClinicalTwin3D";
 import { SmartwatchSimulator } from "../SmartwatchSimulator";
-import { clinicalApi } from "../api";
+import { clinicalApi, LOINC, VITAL_RANGE, vitalStatus } from "../api";
 import { usePatient } from "../hooks";
-import { VitalsStrip } from "../PatientPanels";
 import { SavedReportsPanel } from "../SavedReports";
 import { buildPatientHealthReport, reportToHtml } from "../reportGenerator";
 import type { AuthSession } from "../auth";
 import { ReportEmailStatus, useReportEmail } from "../reportEmail";
-import type { FhirObservation } from "../types";
+import type { FhirObservation, MonitorResult } from "../types";
 import { VitalsCharts } from "../VitalsCharts";
-import { Empty, Panel, TIER_LABEL, dateTime } from "../ui";
+import { Empty, Panel, dateTime } from "../ui";
+
+type Tone = "ok" | "watch" | "review" | "urgent" | "sensor";
+
+const PATIENT_VITALS = ["heart_rate", "spo2", "respiratory_rate", "temperature"] as const;
+type PatientMetric = (typeof PATIENT_VITALS)[number];
+
+type BaselineMap = Record<string, { center: number; spread: number }>;
+
+const CHECK_IN_LABEL: Record<string, string> = {
+  NORMAL: "Check-in",
+  WATCH: "Small change",
+  REVIEW: "Noticeable change",
+  URGENT: "Important change",
+};
+
+/** Smallest change from a personal baseline that is worth flagging, per vital. */
+const USUAL_TOLERANCE: Record<PatientMetric, number> = {
+  heart_rate: 8,
+  spo2: 2,
+  respiratory_rate: 3,
+  temperature: 0.4,
+};
+
+function greeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
+function daysSince(isoDate: string | null | undefined): number | null {
+  if (!isoDate) return null;
+  const then = new Date(`${isoDate.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(then.getTime())) return null;
+  const now = new Date();
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+  const days = Math.floor((today - then.getTime()) / 86_400_000);
+  return days >= 0 ? days : null;
+}
+
+function joinList(parts: string[]): string {
+  if (parts.length <= 1) return parts[0] ?? "";
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
 
 function patientStatusCopy(
   hasTimestamp: boolean,
   suppressed: boolean,
   tier: string,
   alertKind: string | null,
-): { badge: string; tone: "ok" | "watch" | "review" | "urgent" | "sensor"; message: string } {
+): { badge: string; tone: Tone; message: string; steps: string[] } {
   if (!hasTimestamp) {
     return {
-      badge: "Waiting for sensor",
+      badge: "Waiting for your first reading",
       tone: "sensor",
       message:
-        "Your wearable monitor has not sent a reading yet. Once your care team or simulator starts streaming, your vitals will appear here automatically.",
+        "Your smartwatch has not sent a reading yet. Start your monitor below and your vitals will appear here automatically.",
+      steps: [
+        "Put the smartwatch on and check the strap is snug.",
+        "Select Start live readings, or send a reading from the watch panel.",
+        "Keep the watch charged — readings update every minute.",
+      ],
     };
   }
   if (suppressed || (alertKind && alertKind !== "CLINICAL")) {
     return {
-      badge: "Check wearable sensor",
+      badge: "Check your wearable sensor",
       tone: "sensor",
       message:
-        "Your last reading looked noisy or disconnected (for example, a loose pulse oximeter). Please check that your sensor is snug and charged.",
+        "Your last reading looked noisy or disconnected, so it was not used for your health score. This is usually a loose sensor rather than a change in your health.",
+      steps: [
+        "Make sure the watch sits flat on your wrist and the strap is snug.",
+        "Sit still for a minute, then send a reading again.",
+        "If the problem continues, charge the watch and contact your care team.",
+      ],
     };
   }
   if (tier === "NORMAL") {
     return {
-      badge: "Recovery steady",
+      badge: "Your recovery looks steady",
       tone: "ok",
       message:
-        "Your recent vital signs are within your personalized post-discharge target range. Keep following your daily care plan.",
+        "Your recent vital signs are within your personal post-discharge target range. Keep following your daily care plan.",
+      steps: [
+        "Keep wearing the watch during the day and while you sleep.",
+        "Take your medications as prescribed and stay hydrated.",
+        "Keep your follow-up appointment with your care team.",
+      ],
     };
   }
   if (tier === "WATCH") {
     return {
-      badge: "Keep an eye on readings",
+      badge: "Keep an eye on your readings",
       tone: "watch",
       message:
-        "A mild shift was noticed compared with your usual range. Rest, stay hydrated, and re-check your sensor readings.",
+        "A mild shift was noticed compared with your usual readings. This is not an emergency, but it is worth watching.",
+      steps: [
+        "Rest for 15 minutes, drink some water, and send a new reading.",
+        "Check that the sensor is snug and the watch is charged.",
+        "If the change persists for a few hours, message your care team.",
+      ],
     };
   }
   if (tier === "REVIEW") {
     return {
-      badge: "Check in with care team",
+      badge: "It is time to check in with your care team",
       tone: "review",
       message:
-        "Your readings show a moderate change from your personal baseline. Please contact your post-discharge nurse or doctor today.",
+        "Your readings show a moderate change from your personal baseline. Your care team should look at this today.",
+      steps: [
+        "Contact your post-discharge nurse or doctor today.",
+        "Rest and avoid strenuous activity until you have spoken to them.",
+        "Send another reading so they can see the latest numbers.",
+      ],
     };
   }
   return {
-    badge: "Contact care team promptly",
+    badge: "Please contact your care team promptly",
     tone: "urgent",
     message:
-      "Your latest vital signs show a significant change. Please reach out to your care team promptly or seek urgent medical attention if you feel unwell.",
+      "Your latest vital signs show a significant change. Reach out to your care team now, or seek urgent medical attention if you feel unwell.",
+    steps: [
+      "Call your care team or your local urgent care line now.",
+      "Do not drive yourself if you feel faint, breathless, or unwell.",
+      "Keep the watch on so your team can see your latest readings.",
+    ],
   };
+}
+
+function describeChange(a: MonitorResult, baselines: BaselineMap): string {
+  const readings = a.explanation?.readings ?? [];
+  const notable = readings.filter((r) => (r.news2_points ?? 0) > 0 || r.drift);
+  if (notable.length === 0) {
+    return a.explanation?.narrative ?? "A change from your usual vital range was detected.";
+  }
+  const parts = notable.slice(0, 3).map((r) => {
+    const digits = r.metric === "temperature" ? 1 : 0;
+    const value = typeof r.value === "number" ? r.value.toFixed(digits) : String(r.value ?? "—");
+    const base = baselines[r.metric];
+    const usual = base ? ` (your usual ${base.center.toFixed(digits)} ${r.unit})` : "";
+    return `${r.label.toLowerCase()} was ${value} ${r.unit}${usual}`;
+  });
+  return `Compared with your usual readings, ${joinList(parts)}.`;
+}
+
+function vitalTile(
+  metric: PatientMetric,
+  value: number | null,
+  untrusted: string[],
+  baselines: BaselineMap,
+): { tone: Tone | "absent" | "high" | "low"; chip: string; note: string } {
+  const meta = LOINC[metric];
+  const digits = metric === "temperature" ? 1 : 0;
+  if (untrusted.includes(metric)) {
+    return {
+      tone: "sensor",
+      chip: "Check sensor",
+      note: "This reading looked noisy, so it was skipped. Check that your watch is snug.",
+    };
+  }
+  if (value === null) {
+    return {
+      tone: "absent",
+      chip: "No reading",
+      note: "Waiting for the next reading from your smartwatch.",
+    };
+  }
+  const base = baselines[metric];
+  const status = vitalStatus(metric, value);
+  const range = VITAL_RANGE[metric];
+  const rangeText = range ? `${range[0]}–${range[1]} ${meta.unit}` : "";
+  if (base) {
+    const margin = Math.max(base.spread, USUAL_TOLERANCE[metric]);
+    const usual = `${base.center.toFixed(digits)} ${meta.unit}`;
+    if (value > base.center + margin) {
+      return { tone: "watch", chip: "Above your usual", note: `You usually sit around ${usual}.` };
+    }
+    if (value < base.center - margin) {
+      return { tone: "watch", chip: "Below your usual", note: `You usually sit around ${usual}.` };
+    }
+  }
+  if (status.tone === "high") {
+    return { tone: "high", chip: "Above normal", note: `Typical resting range is ${rangeText}.` };
+  }
+  if (status.tone === "low") {
+    return { tone: "low", chip: "Below normal", note: `Typical resting range is ${rangeText}.` };
+  }
+  if (base) {
+    return {
+      tone: "ok",
+      chip: "Near your usual",
+      note: `In line with your usual ${base.center.toFixed(digits)} ${meta.unit}.`,
+    };
+  }
+  return { tone: "ok", chip: "Normal range", note: `Typical resting range is ${rangeText}.` };
 }
 
 export function PatientDashboard({ patientId, session }: {
@@ -128,6 +269,13 @@ export function PatientDashboard({ patientId, session }: {
     }
   };
 
+  const focusWatch = () => {
+    setActiveTab("graphs");
+    window.requestAnimationFrame(() => {
+      document.getElementById("my-watch")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+
   if (error && !state) {
     return (
       <Panel className="error">
@@ -138,6 +286,7 @@ export function PatientDashboard({ patientId, session }: {
   if (!state) return <div className="skeleton">Loading your dashboard…</div>;
 
   const p = state.profile;
+  const baselines = state.baselines ?? {};
   const untrusted = state.artifact?.untrusted_metrics ?? [];
   const hasBp = readings.some((r) => r.systolic_bp !== null && r.systolic_bp !== undefined);
   const status = patientStatusCopy(
@@ -146,8 +295,12 @@ export function PatientDashboard({ patientId, session }: {
     state.tier,
     state.alert_kind,
   );
+  const firstName = p.display_name.trim().split(/\s+/)[0] || p.display_name;
+  const dayNumber = daysSince(p.discharged_on);
 
-  const checkIns = alerts.filter((a) => a.alert_kind === "CLINICAL" && a.tier !== "NORMAL").slice(0, 8);
+  const checkIns = alerts
+    .filter((a) => a.alert_kind === "CLINICAL" && a.tier !== "NORMAL")
+    .slice(0, 4);
   const deviceNotices = alerts.filter((a) => a.alert_kind !== "CLINICAL").slice(0, 6);
 
   const handleGenerate = () => {
@@ -161,133 +314,142 @@ export function PatientDashboard({ patientId, session }: {
 
   return (
     <div className="col patient-dash">
-      <div className="spread">
-        <div>
-          <span className="chip">Patient Portal · {p.patient_id}</span>
-          <h1 className="section-title" style={{ marginTop: 8 }}>
-            Welcome back, {p.display_name}
-          </h1>
-          <p className="lede">
-            {p.age_years} years · {p.sex} · Discharged {p.discharged_on}
-          </p>
+      <section className={`patient-hero patient-hero--${status.tone}`} aria-labelledby="patient-hero-title">
+        <div className="patient-hero__top">
+          <div className="patient-hero__intro">
+            <p className="patient-hero__eyebrow">
+              {greeting()}, {firstName}
+            </p>
+            <h1 className="patient-hero__title" id="patient-hero-title">
+              {status.badge}
+            </h1>
+            <p className="patient-hero__msg">{status.message}</p>
+            <p className="patient-hero__meta">
+              {p.age_years} years · {p.sex}
+              {dayNumber !== null ? ` · Day ${dayNumber + 1} of recovery` : ""}
+              {state.timestamp ? ` · Last reading ${dateTime(state.timestamp)} UTC` : " · No readings yet"}
+            </p>
+          </div>
+          <div className="patient-hero__side">
+            <span className={`pill pill--${connection === "live" ? "live" : "off"}`} role="status">
+              <span className="pill__dot" aria-hidden />
+              {connection === "live" ? "Monitor connected" : "Reconnecting"}
+            </span>
+            <div className="patient-hero__actions">
+              {!state.timestamp ? (
+                <button className="btn btn--primary" onClick={startMyStream} disabled={streamingBusy}>
+                  {streamingBusy ? "Starting…" : "Start live readings"}
+                </button>
+              ) : (
+                <button className="btn btn--primary" onClick={focusWatch}>
+                  Open my smartwatch
+                </button>
+              )}
+              <button className="btn" onClick={handleGenerate} disabled={reportEmail.status.sending}>
+                {reportEmail.status.sending ? "Preparing report…" : "My health report"}
+              </button>
+            </div>
+          </div>
         </div>
-        <div className="row row--tight" style={{ alignItems: "center" }}>
-          <span className={`pill pill--${connection === "live" ? "live" : "off"}`}>
-            <span className="pill__dot" aria-hidden />
-            {connection === "live" ? "Live monitor" : "Reconnecting"}
-          </span>
-          {!state.timestamp && (
-            <button
-              className="btn"
-              onClick={startMyStream}
-              disabled={streamingBusy}
-            >
-              {streamingBusy ? "Starting stream…" : "Start Wearable Stream"}
-            </button>
-          )}
-          <button
-            className="btn"
-            onClick={() => setWatchConnected((v) => !v)}
-          >
-            {watchConnected ? "Watch Connected ✓" : "Connect Your Watch"}
-          </button>
-          <button
-            className="btn btn--primary"
-            onClick={handleGenerate}
-            disabled={reportEmail.status.sending}
-          >
-            Generate My Health Report
-          </button>
+        <div className="patient-steps">
+          <h2 className="patient-steps__title">What to do now</h2>
+          <ol className="patient-steps__list">
+            {status.steps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
         </div>
-      </div>
+      </section>
 
       <ReportEmailStatus status={reportEmail.status} />
 
-      <section className={`patient-banner patient-banner--${status.tone}`}>
-        <div className="spread">
-          <div>
-            <div className="patient-banner__badge">{status.badge}</div>
-            <p className="patient-banner__msg">{status.message}</p>
+      <section className="patient-section" aria-labelledby="vitals-heading">
+        <div className="patient-section__head">
+          <h2 className="patient-section__title" id="vitals-heading">
+            Your vitals right now
+          </h2>
+          <p className="patient-section__hint">
+            {state.timestamp
+              ? `Updated ${dateTime(state.timestamp)} UTC · compared with your personal resting baseline`
+              : "Waiting for your first smartwatch reading"}
+          </p>
+        </div>
+        <div className="vitals-now">
+          {PATIENT_VITALS.map((metric) => {
+            const meta = LOINC[metric];
+            const value = state.observation ? state.observation[metric] : null;
+            const tile = vitalTile(metric, value, untrusted, baselines);
+            return (
+              <article className={`vital-tile vital-tile--${tile.tone}`} key={metric}>
+                <div className="vital-tile__label">{meta.label}</div>
+                <div className="vital-tile__value">
+                  {value === null ? "—" : value.toFixed(metric === "temperature" ? 1 : 0)}
+                  <span className="vital-tile__unit">{meta.unit}</span>
+                </div>
+                <span className="vital-tile__chip">{tile.chip}</span>
+                <p className="vital-tile__note">{tile.note}</p>
+              </article>
+            );
+          })}
+        </div>
+        <div className="patient-facts">
+          <div className="patient-fact">
+            <span className="patient-fact__label">Oxygen target</span>
+            <span className="patient-fact__value">
+              {p.spo2_scale === 2 ? `${p.spo2_target[0]}–${p.spo2_target[1]}%` : "96–100%"}
+            </span>
+            <span className="patient-fact__note">
+              {p.spo2_scale === 2 ? "Set for your breathing condition" : "Standard adult target"}
+            </span>
           </div>
-          <div className="small muted" style={{ textAlign: "right" }}>
-            {state.timestamp ? (
-              <>
-                Last reading
-                <br />
-                <strong>{dateTime(state.timestamp)} UTC</strong>
-              </>
-            ) : (
-              "No readings yet"
-            )}
+          <div className="patient-fact">
+            <span className="patient-fact__label">Heart-rate alerts</span>
+            <span className="patient-fact__value">
+              {p.beta_blocked ? `+${p.pulse_correction_bpm} bpm` : "Standard"}
+            </span>
+            <span className="patient-fact__note">
+              {p.beta_blocked ? "Adjusted for your heart medication" : "No medication adjustment"}
+            </span>
+          </div>
+          <div className="patient-fact">
+            <span className="patient-fact__label">Readings tracked</span>
+            <span className="patient-fact__value">{readings.length}</span>
+            <span className="patient-fact__note">
+              {state.baseline_ready ? "Personal baseline active" : "Still learning your baseline"}
+              {state.suppressed_count > 0 ? ` · ${state.suppressed_count} noisy readings filtered` : ""}
+            </span>
           </div>
         </div>
       </section>
 
-      <div className="metrics">
-        <div className="metric">
-          <div className="metric__label">Personal SpO₂ Target</div>
-          <div className="metric__value">
-            {p.spo2_scale === 2 ? `${p.spo2_target[0]}–${p.spo2_target[1]}%` : "96–100%"}
-          </div>
-          <div className="metric__note">
-            {p.spo2_scale === 2
-              ? "Tailored Scale 2 oxygen target for your breathing plan"
-              : "Standard oxygen saturation target"}
-          </div>
-        </div>
-        <div className="metric">
-          <div className="metric__label">Medication Adjustment</div>
-          <div className="metric__value">{p.beta_blocked ? "Beta-blocker" : "Standard"}</div>
-          <div className="metric__note">
-            {p.beta_blocked
-              ? `Pulse alerts adjusted (+${p.pulse_correction_bpm} bpm) for your heart medication`
-              : "No heart-rate medication offset applied"}
-          </div>
-        </div>
-        <div className="metric">
-          <div className="metric__label">Readings Tracked</div>
-          <div className="metric__value">{readings.length}</div>
-          <div className="metric__note">
-            {state.baseline_ready
-              ? "Personal baseline active"
-              : "Learning your normal resting baseline"}
-          </div>
-        </div>
-        <div className="metric">
-          <div className="metric__label">Wearable Health</div>
-          <div className="metric__value">{state.suppressed_count}</div>
-          <div className="metric__note">Noisy / loose-sensor readings filtered out</div>
-        </div>
-      </div>
-
-      <div className="row row--tight" role="tablist" aria-label="Patient dashboard views">
+      <div className="segmented" role="tablist" aria-label="Dashboard views">
         <button
           type="button"
           role="tab"
           aria-selected={activeTab === "graphs"}
-          className={`btn ${activeTab === "graphs" ? "btn--primary" : ""}`}
+          className={`segmented__item${activeTab === "graphs" ? " segmented__item--active" : ""}`}
           onClick={() => setActiveTab("graphs")}
         >
-          Smartwatch &amp; Vital Graphs
+          Watch &amp; trends
         </button>
         <button
           type="button"
           role="tab"
           aria-selected={activeTab === "body3d"}
-          className={`btn ${activeTab === "body3d" ? "btn--primary" : ""}`}
+          className={`segmented__item${activeTab === "body3d" ? " segmented__item--active" : ""}`}
           onClick={() => setActiveTab("body3d")}
         >
-          Open 3D Body Twin
+          3D body view
         </button>
       </div>
 
       {activeTab === "body3d" ? (
         <Panel
-          title="My 3D Digital Twin"
-          hint="Live anatomical model driven by your smartwatch / wearable vitals (amber/red highlights show stressed organs)"
+          title="Your 3D body view"
+          hint="A live model of your organs driven by your smartwatch readings — amber and red show stressed areas"
           action={
             <button className="btn btn--small" onClick={() => setActiveTab("graphs")}>
-              ← Back to Watch &amp; Graphs
+              ← Back to watch &amp; trends
             </button>
           }
         >
@@ -299,65 +461,61 @@ export function PatientDashboard({ patientId, session }: {
         </Panel>
       ) : (
         <>
-          <Panel
-            title="Wearable Smartwatch on Wrist (Live Demo)"
-            hint="Adjust vitals on your watch and send readings to trigger notifications & update graphs"
-          >
-            <SmartwatchSimulator
-              patientId={patientId}
-              state={state}
-              connected={watchConnected}
-              onToggleConnect={() => setWatchConnected((v) => !v)}
-              values={watchValues}
-              onChangeValues={setWatchValues}
-            />
-          </Panel>
+          <div id="my-watch" className="scroll-anchor">
+            <Panel
+              title="Your smartwatch"
+              hint="Change the numbers or pick a scenario, then send a reading"
+            >
+              <SmartwatchSimulator
+                patientId={patientId}
+                state={state}
+                connected={watchConnected}
+                onToggleConnect={() => setWatchConnected((v) => !v)}
+                values={watchValues}
+                onChangeValues={setWatchValues}
+              />
+            </Panel>
+          </div>
 
           <Panel
-            title="My Vital Trend Graphs"
-            hint={`${readings.length} readings · shaded band shows your personal resting baseline`}
+            title="Your vital trends"
+            hint={`${readings.length} readings · the shaded band is your personal resting baseline`}
           >
             {readings.length === 0 ? (
               <Empty>
-                No trend history yet. Click &ldquo;Send Watch Reading&rdquo; above or &ldquo;Start Wearable Stream&rdquo; to plot live graphs.
+                No trend history yet. Send a reading from the watch above, or select Start live
+                readings to plot your graphs.
               </Empty>
             ) : (
               <VitalsCharts
                 readings={readings}
-                baselines={state.baselines ?? {}}
+                baselines={baselines}
                 untrustedMetrics={untrusted}
                 includeBp={hasBp}
               />
             )}
           </Panel>
 
-          <Panel
-            title="My Latest Vitals"
-            hint={state.timestamp ? `Recorded ${dateTime(state.timestamp)} UTC` : "Waiting for first reading"}
-          >
-            <VitalsStrip observation={state.observation} untrusted={untrusted} />
-          </Panel>
-
           <div className="grid grid--sidebar">
             <div className="col">
-              <Panel
-                title="Health Check-In Notices"
-                hint="Plain-language updates when your vitals shift"
-              >
+              <Panel title="Recent check-ins" hint="Plain-language notes when something changed">
                 {checkIns.length === 0 ? (
-                  <Empty>No check-in alerts right now. Your readings look steady.</Empty>
+                  <Empty>Nothing to flag — your recent readings look steady.</Empty>
                 ) : (
-                  <div className="col" style={{ gap: 10 }}>
+                  <div className="patient-checkins">
                     {checkIns.map((a) => (
-                      <div className="evidence__block" key={`${a.timestamp}-${a.tier}`}>
-                        <div className="spread">
-                          <strong>{TIER_LABEL[a.tier]}</strong>
-                          <span className="small muted">{dateTime(a.timestamp)} UTC</span>
+                      <article
+                        className={`patient-checkin patient-checkin--${a.tier.toLowerCase()}`}
+                        key={`${a.timestamp}-${a.tier}`}
+                      >
+                        <div className="patient-checkin__head">
+                          <span className="patient-checkin__tier">
+                            {CHECK_IN_LABEL[a.tier] ?? a.tier}
+                          </span>
+                          <span className="patient-checkin__time">{dateTime(a.timestamp)} UTC</span>
                         </div>
-                        <p className="small" style={{ margin: "6px 0 0" }}>
-                          {a.explanation?.narrative ?? "A change from your usual vital range was detected."}
-                        </p>
-                      </div>
+                        <p className="patient-checkin__body">{describeChange(a, baselines)}</p>
+                      </article>
                     ))}
                   </div>
                 )}
@@ -365,29 +523,25 @@ export function PatientDashboard({ patientId, session }: {
             </div>
 
             <div className="col">
-              <Panel title="My Care Plan & Medications">
-                <div className="col" style={{ gap: 12 }}>
+              <Panel title="Your care plan">
+                <div className="col" style={{ gap: 14 }}>
                   <div>
-                    <div className="small muted" style={{ fontWeight: 600, marginBottom: 4 }}>
-                      Conditions on discharge summary
-                    </div>
+                    <h3 className="patient-subhead">Conditions</h3>
                     {p.conditions.length === 0 ? (
-                      <p className="small muted">None listed</p>
+                      <p className="patient-note muted">None listed</p>
                     ) : (
                       <ul className="patient-list">
                         {p.conditions.map((c) => (
-                          <li key={c.code}>{c.display}</li>
+                          <li key={c.code}>{c.display.replace(/\s*\(disorder\)$/i, "")}</li>
                         ))}
                       </ul>
                     )}
                   </div>
 
                   <div>
-                    <div className="small muted" style={{ fontWeight: 600, marginBottom: 4 }}>
-                      Active medications
-                    </div>
+                    <h3 className="patient-subhead">Medications</h3>
                     {p.medications.length === 0 ? (
-                      <p className="small muted">None listed</p>
+                      <p className="patient-note muted">None listed</p>
                     ) : (
                       <ul className="patient-list">
                         {p.medications.map((m) => (
@@ -399,59 +553,62 @@ export function PatientDashboard({ patientId, session }: {
 
                   {p.notes && (
                     <div>
-                      <div className="small muted" style={{ fontWeight: 600, marginBottom: 4 }}>
-                        Care team notes
-                      </div>
-                      <p className="small" style={{ margin: 0 }}>
-                        {p.notes}
+                      <h3 className="patient-subhead">Notes from your care team</h3>
+                      <p className="patient-note">
+                        {p.notes.replace(/^Synthea bundle \S+ \(population seed \d+\)\.\s*/i, "")}
                       </p>
                     </div>
                   )}
                 </div>
               </Panel>
 
-              <Panel title="Wearable Device Reminders" hint="Sensor fit & connectivity">
+              <Panel title="Wearable reminders" hint="Sensor fit and connection">
                 {deviceNotices.length === 0 ? (
-                  <Empty>Your wearable sensor connection looks good.</Empty>
+                  <Empty>Your wearable connection looks good.</Empty>
                 ) : (
-                  <div className="col" style={{ gap: 8 }}>
+                  <div className="patient-checkins">
                     {deviceNotices.map((a) => (
-                      <div className="evidence__block" key={`${a.timestamp}-dev`}>
-                        <div className="spread">
-                          <span className="chip chip--sensor">Device check</span>
-                          <span className="small muted">{dateTime(a.timestamp)} UTC</span>
+                      <article className="patient-checkin patient-checkin--sensor" key={`${a.timestamp}-dev`}>
+                        <div className="patient-checkin__head">
+                          <span className="patient-checkin__tier">
+                            {CHECK_IN_LABEL[a.tier] ?? "Sensor check"}
+                          </span>
+                          <span className="patient-checkin__time">{dateTime(a.timestamp)} UTC</span>
                         </div>
-                        <p className="small" style={{ margin: "6px 0 0" }}>
+                        <p className="patient-checkin__body">
                           {a.artifact.reasons[0] ?? "Please check that your wearable sensor is snug."}
                         </p>
-                      </div>
+                      </article>
                     ))}
                   </div>
                 )}
               </Panel>
 
               <Panel
-                title="My FHIR R4 Health Records"
-                hint={`${state.stored_observations} observations · HAPI ${hapiHealthy ? "connected" : "offline"}`}
+                title="Your health records"
+                hint={`${state.stored_observations} readings stored · FHIR ${hapiHealthy ? "connected" : "offline"}`}
               >
                 {fhirEntries.length > 0 ? (
-                  <div className="col" style={{ gap: 6 }}>
-                    {fhirEntries.slice(0, 5).map((obs, idx) => (
-                      <div className="evidence__block small" key={obs.id ?? idx}>
-                        <div className="spread">
-                          <strong>{obs.code?.text ?? obs.code?.coding?.[0]?.display ?? "Observation"}</strong>
-                          <span className="muted">
-                            {obs.valueQuantity ? `${obs.valueQuantity.value} ${obs.valueQuantity.unit ?? ""}` : "missing"}
-                          </span>
+                  <div className="record-list">
+                    {fhirEntries.slice(0, 5).map((obs, idx) => {
+                      const name =
+                        obs.code?.text ?? obs.code?.coding?.[0]?.display ?? "Observation";
+                      const value = obs.valueQuantity
+                        ? `${obs.valueQuantity.value} ${obs.valueQuantity.unit ?? ""}`.trim()
+                        : "missing";
+                      return (
+                        <div className="record-row" key={obs.id ?? idx}>
+                          <span className="record-row__name">{name}</span>
+                          <span className="record-row__value">{value}</span>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
-                  <p className="small muted" style={{ margin: 0 }}>
+                  <p className="patient-note muted">
                     {hapiHealthy === false
-                      ? "Local HAPI FHIR server (port 8080) is not running; readings are still tracked live in your monitor."
-                      : "No FHIR observations stored for your record yet."}
+                      ? "The health-records server is offline. Your readings are still tracked live in your monitor."
+                      : "No health records stored for your record yet."}
                   </p>
                 )}
               </Panel>

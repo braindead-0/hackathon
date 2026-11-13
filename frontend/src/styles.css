@@ -18,15 +18,15 @@
   --radius-s: 6px;
   --radius-m: 12px;
   --gap: 16px;
-  --font: "Instrument Sans Variable", "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 
   color-scheme: light;
   font-family: var(--font);
   color: var(--ink);
   background: var(--porcelain);
-  font-size: 15px;
-  line-height: 1.5;
-  font-feature-settings: "tnum" 1;
+  font-size: 16px;
+  line-height: 1.55;
+  font-feature-settings: "tnum" 1, "cv11" 1;
   -webkit-font-smoothing: antialiased;
 }
 

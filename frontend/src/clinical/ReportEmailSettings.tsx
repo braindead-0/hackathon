@@ -42,11 +42,19 @@ export function ReportEmailSettings({ session }: { session: AuthSession }) {
   // GET's email belongs to the global active session, which may be another tab.
   const email = session.email?.trim();
   return (
-    <section className="panel" aria-label="Report email settings" style={{ marginBottom: 16 }}>
-      <div className="spread" style={{ gap: 12, flexWrap: "wrap" }}>
+    <details className="email-settings" aria-label="Report email settings">
+      <summary className="email-settings__summary">
+        <span className="email-settings__title">Report email delivery</span>
+        <span className="email-settings__meta small muted">
+          {email ?? (settings ? `${settings.default_email} (server default)` : "loading recipient…")}
+          {settings ? ` · weekly emails ${settings.enabled ? "on" : "off"}` : ""}
+          {!loading && settings && !settings.available ? " · email unavailable" : ""}
+        </span>
+        <span className="email-settings__toggle small">Configure</span>
+      </summary>
+      <div className="email-settings__body">
         <div>
-          <strong>Report emails</strong>
-          <p className="small" style={{ margin: "6px 0" }}>
+          <p className="small" style={{ margin: "0 0 4px" }}>
             {email ? `Email provided at sign-in: ${email}` : settings
               ? `Optional email left blank: using ${settings.default_email} (server default).`
               : "Optional email left blank: the server default recipient will be used."}
@@ -70,14 +78,14 @@ export function ReportEmailSettings({ session }: { session: AuthSession }) {
             Refresh email settings
           </button>
         </div>
+        <p className="small muted email-settings__status" role="status">
+          {loading ? "Loading email availability and weekly setting…" : saving ? "Saving global weekly setting…"
+            : !settings ? "Email availability unknown."
+            : settings.available ? `Email service configured. Weekly emails ${settings.enabled ? "on" : "off"}. Provider recipient restrictions may still apply.`
+            : "Email service unavailable: server email configuration is required. Weekly toggle is disabled."}
+        </p>
+        {error && <p className="notice notice--warn small" role="alert">Email settings: {error}</p>}
       </div>
-      <p className="small muted" role="status" style={{ marginBottom: 0 }}>
-        {loading ? "Loading email availability and weekly setting…" : saving ? "Saving global weekly setting…"
-          : !settings ? "Email availability unknown."
-          : settings.available ? `Email service configured. Weekly emails ${settings.enabled ? "on" : "off"}. Provider recipient restrictions may still apply.`
-          : "Email service unavailable: server email configuration is required. Weekly toggle is disabled."}
-      </p>
-      {error && <p className="notice notice--warn small" role="alert">Email settings: {error}</p>}
-    </section>
+    </details>
   );
 }

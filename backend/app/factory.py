@@ -132,6 +132,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.mount("/vitaltrack", StaticFiles(directory=mobile_www, html=True), name="vitaltrack")
 
     dist = Path(settings.frontend_dist)
+    landing = dist / "landing.html"
+    if landing.is_file():
+
+        @app.get("/", include_in_schema=False)
+        def landing_page():
+            return FileResponse(landing, headers={"Cache-Control": "no-cache"})
+
     if dist.is_dir() and (dist / "index.html").exists():
         index = dist / "index.html"
 

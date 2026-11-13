@@ -73,12 +73,17 @@ function nowIso(): string {
 }
 
 export function reportToMarkdown(report: GeneratedReport): string {
+  const revision =
+    report.doctorNotes?.editedBy || report.doctorNotes?.editedAt
+      ? `- **Revised:** ${report.doctorNotes?.editedBy ?? "clinician"}${report.doctorNotes?.editedAt ? ` · ${dateTime(report.doctorNotes.editedAt)} UTC` : ""}`
+      : null;
   const lines: string[] = [
     `# ${report.title}`,
     `_${report.subtitle}_`,
     "",
     `- **Generated:** ${dateTime(report.generatedAt)} UTC`,
     `- **Prepared for / by:** ${report.authorLabel}`,
+    ...(revision ? [revision] : []),
     "",
     `> **Safety notice:** ${report.disclaimer}`,
     "",
@@ -860,6 +865,7 @@ export function reportToHtml(report: GeneratedReport, twinSnapshotDataUrl?: stri
   .lab-tag { font-family: 'Times New Roman', serif; font-style: italic; font-weight: bold; font-size: 13.5px; margin-top: 5px; }
   .report-title { text-align: center; font-weight: bold; font-size: 14px; margin: 12px 0 2px; text-transform: uppercase; letter-spacing: .4px; }
   .report-sub { text-align: center; font-size: 11px; color: #333; margin-bottom: 4px; }
+  .revised { text-align: center; font-size: 10.5px; color: #1a3fa0; font-weight: bold; margin: 2px 0 6px; }
   .particulars { display: flex; justify-content: space-between; gap: 20px; margin: 16px 0 4px; }
   .particulars .left div, .particulars .right div { margin: 4px 0; }
   .particulars .right { min-width: 40%; }
@@ -905,6 +911,11 @@ export function reportToHtml(report: GeneratedReport, twinSnapshotDataUrl?: stri
     </div>
     <div class="report-title">${escapeHtml(report.title)}</div>
     <div class="report-sub">${escapeHtml(report.subtitle)}</div>
+    ${
+      notes?.editedBy || notes?.editedAt
+        ? `<div class="revised">Revised by ${escapeHtml(notes.editedBy ?? "clinician")}${notes.editedAt ? ` · ${escapeHtml(dateTime(notes.editedAt))} UTC` : ""}</div>`
+        : ""
+    }
     ${particularsHtml}
     ${
       vc

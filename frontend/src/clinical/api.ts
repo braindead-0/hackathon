@@ -31,6 +31,29 @@ export interface ReportAutomation {
   email: string | null;
 }
 
+export interface EmergencyContact {
+  name: string;
+  relation: string;
+  phone: string;
+}
+
+export interface AlertProfileSettings {
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  contacts: EmergencyContact[];
+  default_phone: string | null;
+  fallback_configured: boolean;
+  max_contacts: number;
+}
+
+export interface AlertProfileIdentity {
+  role: "doctor" | "patient";
+  clinician_id?: string | null;
+  patient_id?: string | null;
+  display_name?: string | null;
+}
+
 export interface EmailReportInput {
   owner_id: string;
   title: string;
@@ -166,8 +189,22 @@ export const clinicalApi = {
       "/api/clinical/reports/store",
       body,
     ),
-  saveRecord: (body: { patient_id: string; report: unknown }) =>
-    post<{ bucket: string; key: string }>("/api/clinical/reports/record", body),
+  saveRecord: (body: {
+    patient_id: string;
+    report: unknown;
+    patient_summary?: string | null;
+    whatsapp_to?: string | null;
+    clinician_id?: string | null;
+  }) =>
+    post<{
+      bucket: string;
+      key: string;
+      notified?: {
+        patient?: { sent: boolean; error?: string; recipients?: string[] };
+        clinician?: { sent: boolean; error?: string; recipients?: string[] } | null;
+        telegram?: { sent: boolean; error?: string } | null;
+      };
+    }>("/api/clinical/reports/record", body),
   listRecords: (patientId: string) =>
     request<{ records: RecordSummary[] }>(
       `/api/clinical/reports/records?patient_id=${encodeURIComponent(patientId)}`,
@@ -193,6 +230,8 @@ export const clinicalApi = {
       recipients?: string[];
       sids?: string[];
       error?: string;
+      patient?: { sent: boolean; dry_run?: boolean; error?: string } | null;
+      telegram?: { sent: boolean; dry_run?: boolean; error?: string } | null;
     }>(`/api/clinical/whatsapp/${jobId}`),
   setActiveSession: (body: ActiveSessionInput) =>
     post<ActiveSessionResult>("/api/clinical/session/active", body),
@@ -202,6 +241,21 @@ export const clinicalApi = {
     request<ReportAutomation>("/api/clinical/reports/automation"),
   setReportAutomation: (body: { enabled: boolean }) =>
     post<{ enabled: boolean }>("/api/clinical/reports/automation", body),
+  getAlertProfile: (identity: AlertProfileIdentity) => {
+    const q = new URLSearchParams({ role: identity.role });
+    if (identity.clinician_id) q.set("clinician_id", identity.clinician_id);
+    if (identity.patient_id) q.set("patient_id", identity.patient_id);
+    if (identity.display_name) q.set("display_name", identity.display_name);
+    return request<AlertProfileSettings>(`/api/clinical/settings/alert-profile?${q}`);
+  },
+  setAlertProfile: (
+    body: AlertProfileIdentity & {
+      name?: string | null;
+      email?: string | null;
+      phone?: string | null;
+      contacts: EmergencyContact[];
+    },
+  ) => post<AlertProfileSettings>("/api/clinical/settings/alert-profile", body),
   askWhatsapp: (body: {
     question: string;
     send_to_whatsapp?: boolean;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { clinicalApi } from "./api";
 import { activeSessionInput, clearSession, loadSession, saveSession, type AuthSession } from "./auth";
+import { AlertProfileSettings } from "./AlertProfileSettings";
 import { ReportEmailSettings } from "./ReportEmailSettings";
 import "./clinical.css";
 import { useWard } from "./hooks";
@@ -89,7 +90,7 @@ export function ClinicalApp({ digitalTwin }: { digitalTwin: ReactNode }) {
   return (
     <div className="clinical">
       <header className="clinical__header">
-        <div className="clinical__bar">
+        <div className={`clinical__bar${session?.role === "patient" ? " clinical__bar--patient" : ""}`}>
           <div className="clinical__brand">
             <span className="clinical__mark" aria-hidden>
               <svg width="20" height="20" viewBox="0 0 24 24">
@@ -179,7 +180,12 @@ export function ClinicalApp({ digitalTwin }: { digitalTwin: ReactNode }) {
           </section>
         )}
 
-        {session && <ReportEmailSettings key={JSON.stringify(session)} session={session} />}
+        {session && (
+          <AlertProfileSettings key={`profile-${JSON.stringify(session)}`} session={session} />
+        )}
+        {session?.role === "doctor" && (
+          <ReportEmailSettings key={JSON.stringify(session)} session={session} />
+        )}
 
         {!session ? (
           <SignInPage rows={ward.rows} onSignIn={handleSignIn} />

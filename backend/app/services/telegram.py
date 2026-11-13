@@ -21,6 +21,9 @@ def _send_telegram(text: str) -> dict[str, Any]:
     chat_id = cfg.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
         return {"sent": False, "error": "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing in .env."}
+    if cfg.get("DRY_RUN", "false").lower() in ("1", "true", "yes"):
+        log.info("Telegram DRY_RUN message to %s: %s", chat_id, text[:200])
+        return {"sent": True, "dry_run": True, "chat_id": chat_id}
     try:
         with httpx.Client(timeout=30, trust_env=False) as client:
             response = client.post(
@@ -36,6 +39,11 @@ def _send_telegram(text: str) -> dict[str, Any]:
         return {"sent": False, "error": str(exc)}
 
 
+def send_telegram_text(text: str) -> dict[str, Any]:
+    """Send pre-composed text to the configured clinician chat."""
+    return _send_telegram(text)
+
+
 def send_telegram_alert(
     *,
     patient_name: str,
@@ -46,6 +54,7 @@ def send_telegram_alert(
     narrative: str,
     abnormal: list[str] | None = None,
     risk_level: str | None = None,
+    audience: str = "clinician",
 ) -> dict[str, Any]:
     return _send_telegram(
         format_alert(
@@ -57,6 +66,7 @@ def send_telegram_alert(
             narrative=narrative,
             abnormal=abnormal,
             risk_level=risk_level,
+            audience=audience,
         )
     )
 

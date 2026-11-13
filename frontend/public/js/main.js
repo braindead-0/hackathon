@@ -409,35 +409,35 @@
   /* ---------------- services showcase (home tabs) ---------------- */
   var SERVICES = [
     {
-      id: "one-to-one-therapy",
-      title: "One-to-One Therapy",
-      body: "Regular sessions to look at the pressures and habits that have quietly become your normal.",
-      price: "$85/session",
-      tags: ["ANXIETY", "OVERTHINKING", "SELF-DOUBT", "BIG CHANGES", "OLD PATTERNS"],
+      id: "explained-alerts",
+      title: "Explained alerts",
+      body: "Every alert names the reading, the rule and the fact from your discharge plan that triggered it.",
+      price: "$0",
+      tags: ["HEART RATE", "OXYGEN", "RESPIRATION", "TEMPERATURE", "MOBILITY"],
       image: "images/service-individual.jpg",
     },
     {
-      id: "anxiety-and-overthinking",
-      title: "Anxiety and Overthinking",
-      body: "Understand the cycle underneath constant worry, racing thoughts and the need to be certain.",
-      price: "$85/session",
-      tags: ["CONSTANT WORRY", "RACING THOUGHTS", "UNCERTAINTY", "AVOIDANCE", "BROKEN SLEEP"],
+      id: "personal-baseline",
+      title: "Personal baseline",
+      body: "Your watch is compared with your own normal, not a population threshold, so a slow drift still shows up.",
+      price: "$0",
+      tags: ["ROLLING 14 DAYS", "OWN HISTORY", "SLOW DRIFT", "RESTING HR", "NIGHT HR"],
       image: "images/service-anxiety.jpg",
     },
     {
-      id: "burnout-and-exhaustion",
-      title: "Burnout and Exhaustion",
-      body: "For when long pressure has worn down your energy, your focus and your patience with yourself.",
-      price: "$85/session",
-      tags: ["WORK PRESSURE", "RUNNING ON EMPTY", "BOUNDARIES", "LOST MOTIVATION", "RECOVERY"],
+      id: "daily-trend-reports",
+      title: "Daily trend reports",
+      body: "One short summary a day, plus a written report you can take to your follow-up appointment.",
+      price: "$0",
+      tags: ["DAILY SUMMARY", "TREND LINES", "PDF REPORT", "EMAIL DIGEST", "NO LOGIN"],
       image: "images/service-stress.jpg",
     },
     {
-      id: "couples-and-relationships",
-      title: "Couples and Relationships",
-      body: "A structured space for individuals or couples to work through recurring conflict and say things clearly.",
-      price: "$85/session",
-      tags: ["COUPLES", "COMMUNICATION", "TRUST", "BOUNDARIES", "THE SAME ARGUMENT"],
+      id: "smartwatch-sync",
+      title: "Smartwatch sync",
+      body: "Pair the watch you already own, or enter a reading by hand in under a minute. Both work offline.",
+      price: "$0",
+      tags: ["APPLE WATCH", "WEAR OS", "BLE PAIRING", "MANUAL ENTRY", "OFFLINE"],
       image: "images/service-relationship.jpg",
     },
   ];
@@ -489,7 +489,7 @@
         s.body +
         "</p>" +
         '<div data-card-part class="mt-8 border-t border-ink/10 pt-5">' +
-        '<p class="eyebrow text-mist">Starting price</p>' +
+        '<p class="eyebrow text-mist">Cost to you</p>' +
         '<p class="font-display mt-1 text-[24px] text-ink md:text-[28px]">' +
         s.price +
         "</p></div>" +
@@ -616,23 +616,23 @@
 
   var PRINCIPLES = [
     {
-      title: "Warmth before assessment",
-      body: "You are met as a person having a hard time, not a case to be worked out. Nothing you bring will be treated as too small or too much.",
+      title: "Personal, not average",
+      body: "Alerts are judged against your own rolling baseline and the conditions on your discharge plan, not a fixed threshold for everyone.",
       image: "images/principle-warmth.jpg",
     },
     {
-      title: "Privacy you can count on",
-      body: "What you say in a session stays in that room. Your records are handled with care, discretion and full professional confidentiality.",
+      title: "Private by design",
+      body: "Readings are stored against your patient record and shared only with the team caring for you. Access is role-based, never public.",
       image: "images/principle-privacy.jpg",
     },
     {
-      title: "Clarity over quick fixes",
-      body: "We work towards understanding what is actually happening rather than rushing to a technique, so the change you make holds.",
+      title: "Explained, never mysterious",
+      body: "Each alert shows the reading, the rule that fired and the profile fact behind it, so you know what changed and what to do next.",
       image: "images/principle-clarity.jpg",
     },
     {
-      title: "Steadiness, at your pace",
-      body: "What you need shifts over time. Sessions are reviewed openly and often, so support keeps matching where you actually are.",
+      title: "Earlier, not louder",
+      body: "The goal is lead time: spotting a slow deterioration hours before a fixed threshold would, while suppressing sensor artefacts.",
       image: "images/principle-steadiness.jpg",
     },
   ];
@@ -854,12 +854,6 @@
     priceTl
       .fromTo(pricing.querySelectorAll("[data-word]"), { yPercent: 115 }, { yPercent: 0, duration: 1.05, stagger: 0.05 })
       .fromTo(
-        pricing.querySelector("[data-price-switch]"),
-        { y: 20, opacity: 0 },
-        { y: 0, opacity: 1, duration: 0.8 },
-        "-=0.7"
-      )
-      .fromTo(
         pricing.querySelectorAll("[data-plan-card]"),
         { y: 64, opacity: 0 },
         { y: 0, opacity: 1, duration: 1.05, stagger: 0.09 },
@@ -872,41 +866,6 @@
         "-=0.75"
       );
     if (reduce) priceTl.progress(1);
-
-    var switchBtn = pricing.querySelector('[role="switch"]');
-    var upfront = false;
-    function applyPrices() {
-      qs(pricing, "[data-price-value]").forEach(function (el) {
-        var base = Number(el.dataset.base || 0);
-        var target = upfront ? Math.round(base * 0.9) : base;
-        var obj = { value: Number(String(el.textContent).replace(/\D/g, "")) || base };
-        gsap.to(obj, {
-          value: target,
-          duration: 0.7,
-          ease: "expo.out",
-          onUpdate: function () {
-            el.textContent = "$" + Math.round(obj.value);
-          },
-        });
-      });
-    }
-    if (switchBtn) {
-      switchBtn.addEventListener("click", function () {
-        upfront = !upfront;
-        switchBtn.setAttribute("aria-checked", upfront ? "true" : "false");
-        var type = switchBtn.querySelector("span");
-        var knob = type.querySelector("span");
-        switchBtn.className =
-          "flex items-center gap-2.5 rounded-full border py-1.5 pl-1.5 pr-4 text-[13px] transition-colors duration-500 [transition-timing-function:var(--ease-brand)] " +
-          (upfront ? "border-ink bg-ink text-cream" : "border-ink/15 text-ink hover:border-ink/35");
-        type.className =
-          "relative h-5 w-9 rounded-full transition-colors duration-500 " + (upfront ? "bg-ember" : "bg-ink/12");
-        knob.className =
-          "absolute top-0.5 size-4 rounded-full bg-white transition-transform duration-500 [transition-timing-function:var(--ease-brand)] " +
-          (upfront ? "translate-x-[18px]" : "translate-x-0.5");
-        applyPrices();
-      });
-    }
   }
 
   /* ---------------- FAQ accordion ---------------- */

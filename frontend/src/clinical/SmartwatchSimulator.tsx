@@ -50,6 +50,8 @@ export function SmartwatchSimulator({
         dry_run?: boolean;
         recipients?: string[];
         error?: string;
+        patient?: { sent: boolean; dry_run?: boolean; error?: string } | null;
+        telegram?: { sent: boolean; dry_run?: boolean; error?: string } | null;
       };
       xgboost?: XgbComparison;
       mobile?: MobileAlertResult;
@@ -243,14 +245,15 @@ export function SmartwatchSimulator({
 
       {/* Interactive Controls */}
       <div className="watch-controls">
-        <div className="spread" style={{ gap: 8 }}>
-          <div>
-            <strong className="small">Watch Pairing</strong>
-            <div className="small muted">
+        <div className="watch-head">
+          <div className="watch-head__state">
+            <span className={`watch-head__dot watch-head__dot--${watchTone}`} aria-hidden />
+            <strong className="small">{connected ? "Watch paired" : "Watch disconnected"}</strong>
+            <span className="small muted">
               {connected
-                ? "Connected — slider changes update your 3D body live"
-                : "Disconnected — click Connect Your Watch to sync"}
-            </div>
+                ? "sliders update your 3D body live"
+                : "connect to sync readings"}
+            </span>
           </div>
           <button
             type="button"
@@ -263,21 +266,12 @@ export function SmartwatchSimulator({
 
         <MobileAlertPairing key={patientId} patientId={patientId} />
 
-        <div>
-          <div className="spread" style={{ marginBottom: 6, gap: 8 }}>
-            <span className="small muted" style={{ fontWeight: 600 }}>
-              Quick scenarios (auto-sends &amp; notifies phone if abnormal)
-            </span>
-            <button
-              type="button"
-              className="btn btn--small btn--primary"
-              disabled={!connected || simStep !== null}
-              onClick={runCardiacSimulation}
-            >
-              {simStep ? `Simulating: ${simStep}` : "▶ Run Heart-Attack Simulation"}
-            </button>
-          </div>
-          <div className="row row--tight" style={{ flexWrap: "wrap" }}>
+        <div className="watch-scenarios">
+          <span className="watch-scenarios__label">
+            Quick scenarios
+            <span className="watch-scenarios__sub">auto-sends &amp; notifies phone if abnormal</span>
+          </span>
+          <div className="watch-scenarios__chips">
             {PRESETS.map((p) => (
               <button
                 key={p.label}
@@ -292,6 +286,14 @@ export function SmartwatchSimulator({
                 {p.label}
               </button>
             ))}
+            <button
+              type="button"
+              className="btn btn--small btn--primary watch-scenarios__run"
+              disabled={!connected || simStep !== null}
+              onClick={runCardiacSimulation}
+            >
+              {simStep ? `Simulating: ${simStep}` : "▶ Run Heart-Attack Simulation"}
+            </button>
           </div>
         </div>
 
@@ -371,8 +373,8 @@ export function SmartwatchSimulator({
           </label>
         </div>
 
-        <div className="row row--tight" style={{ alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
-          <label className="toggle small">
+        <div className="watch-send">
+          <label className="toggle small watch-send__toggle">
             <input
               type="checkbox"
               checked={sendWhatsapp}
@@ -382,8 +384,7 @@ export function SmartwatchSimulator({
           </label>
           {sendWhatsapp && (
             <input
-              className="input"
-              style={{ maxWidth: 230, padding: "5px 9px", fontSize: 13 }}
+              className="input watch-send__phone"
               type="text"
               value={whatsappTo}
               onChange={(e) => setWhatsappTo(e.target.value)}
@@ -391,20 +392,15 @@ export function SmartwatchSimulator({
               aria-label="WhatsApp recipient phone number"
             />
           )}
-        </div>
-
-        <div className="row row--tight" style={{ alignItems: "center", justifyContent: "space-between" }}>
           <button
             type="button"
-            className="btn btn--primary"
+            className="btn btn--primary watch-send__btn"
             onClick={() => handleSend()}
             disabled={sending || !connected}
+            title="Sends to backend, updates the doctor ward and report"
           >
             {sending ? "Sending to monitor…" : "Send Watch Reading & Check Notification"}
           </button>
-          <span className="small muted">
-            Sends to backend, updates Doctor Ward &amp; Report
-          </span>
         </div>
 
         {error && (
@@ -445,17 +441,18 @@ export function SmartwatchSimulator({
             {lastResult.whatsapp && (
               <div className="small" style={{ marginTop: 6, fontWeight: 600 }}>
                 {lastResult.whatsapp.queued
-                  ? "Sending WhatsApp alert..."
+                  ? "Sending alerts to patient and clinician..."
                   : lastResult.whatsapp.sent
-                    ? `WhatsApp alert sent${lastResult.whatsapp.dry_run ? " (dry-run)" : ""} to ${lastResult.whatsapp.recipients?.join(", ")}.`
-                    : `WhatsApp failed: ${lastResult.whatsapp.error ?? "unknown error"}`}
+                    ? `Alert sent to clinician${lastResult.whatsapp.patient?.sent ? " and patient" : " (patient number not on file)"}${lastResult.whatsapp.dry_run ? " — dry-run, nothing delivered" : ""}.`
+                    : `Alert failed: ${lastResult.whatsapp.error ?? "unknown error"}`}
               </div>
             )}
           </div>
         )}
 
-        {xgbComp && (
-          <div className="panel" style={{ padding: 12, marginTop: 10, background: "var(--surface-2, #f8fafc)" }}>
+        <div className="watch-tools">
+          {xgbComp && (
+            <div className="panel watch-tools__card" style={{ padding: 12, background: "var(--surface-2, #f8fafc)" }}>
             <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
               <strong style={{ fontSize: 13 }}>Dual-Engine Risk Analysis (Without XGBoost vs With XGBoost)</strong>
               <span className="pill">{xgbComp.agreement}{xgbComp.score_delta != null ? ` · Δ ${xgbComp.score_delta} pts` : ""}</span>
@@ -492,7 +489,7 @@ export function SmartwatchSimulator({
           </div>
         )}
 
-        <div className="panel" style={{ padding: 12, marginTop: 10 }}>
+        <div className="panel watch-tools__card" style={{ padding: 12 }}>
           <div className="small" style={{ fontWeight: 700, marginBottom: 6 }}>
             Ask a Doubt (Groq AI · Tailored to {state.profile.display_name} &amp; Sent to WhatsApp)
           </div>
@@ -536,6 +533,7 @@ export function SmartwatchSimulator({
               {doubtAns}
             </div>
           )}
+        </div>
         </div>
       </div>
     </div>

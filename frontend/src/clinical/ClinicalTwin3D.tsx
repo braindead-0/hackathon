@@ -171,8 +171,8 @@ export function ClinicalTwin3D({
   const payload = useMemo(() => clinicalToTwinPayload(state, liveOverride), [state, liveOverride]);
 
   return (
-    <div className="col" style={{ gap: 10 }}>
-      <div className="toolbar" role="group" aria-label="Body systems" style={{ alignItems: "center" }}>
+    <div className="twin-panel">
+      <div className="toolbar toolbar--twin" role="group" aria-label="Body systems">
         {LAYERS.map((l) => (
           <label key={l.key} className="toggle">
             <input
@@ -201,77 +201,79 @@ export function ClinicalTwin3D({
         >
           Center Body
         </button>
+        <span className={`chip twin-state twin-state--${payload.state.toLowerCase()}`}>
+          {payload.state === "ANOMALOUS"
+            ? "Abnormal physiology"
+            : payload.state === "ELEVATED"
+              ? "Elevated physiology"
+              : "Stable physiology"}
+        </span>
       </div>
 
-      {labels && (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-            gap: 8,
-            marginBottom: 10,
-          }}
-          aria-label="Live vital readings"
-        >
-          {([
-            { key: "heart_rate", label: "Heart Rate", unit: "bpm" },
-            { key: "spo2", label: "Oxygen (SpO₂)", unit: "%" },
-            { key: "respiratory_rate", label: "Respiratory Rate", unit: "br/min" },
-            { key: "temperature", label: "Temperature", unit: "°C" },
-          ] as const).map(({ key, label, unit }) => {
-            const a = payload.assessments[key];
-            const tone =
-              a?.status === "anomalous"
-                ? { bg: "#fef2f2", border: "#fca5a5", text: "#991b1b" }
-                : a?.status === "watch"
-                  ? { bg: "#fffbeb", border: "#fcd34d", text: "#92400e" }
-                  : { bg: "#f0fdf4", border: "#86efac", text: "#166534" };
-            return (
-              <div
-                key={key}
-                style={{
-                  background: tone.bg,
-                  border: `1px solid ${tone.border}`,
-                  borderRadius: 10,
-                  padding: "8px 12px",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 2,
-                }}
-              >
-                <span className="small muted" style={{ fontSize: 11 }}>{label}</span>
-                <span style={{ fontSize: 18, fontWeight: 700, color: tone.text }}>
-                  {a?.value != null ? `${a.value} ${unit}` : "—"}
-                </span>
-              </div>
-            );
-          })}
+      <div className={`twin-body${labels ? "" : " twin-body--bare"}`}>
+        <div className="twin-stage" style={{ height }}>
+          <TwinScene
+            key={viewKey}
+            payload={payload}
+            showLabels={labels}
+            xray={xray}
+            layers={layers}
+            selected={selected}
+            onSelect={setSelected}
+            height="100%"
+          />
         </div>
-      )}
 
-      <TwinScene
-        key={viewKey}
-        payload={payload}
-        showLabels={labels}
-        xray={xray}
-        layers={layers}
-        selected={selected}
-        onSelect={setSelected}
-        height={height}
-      />
+        {labels && (
+          <div className="twin-readings" aria-label="Live vital readings">
+            {TWIN_READINGS.map(({ key, label, unit, digits }) => {
+              const reading = payload.assessments[key];
+              const tone = readingTone(reading?.status);
+              return (
+                <div key={key} className={`twin-reading twin-reading--${tone}`}>
+                  <span className="twin-reading__label">{label}</span>
+                  <span className="twin-reading__value">
+                    {reading?.value != null ? reading.value.toFixed(digits) : "—"}
+                    <small>{unit}</small>
+                  </span>
+                  <span className="twin-reading__state">
+                    {tone === "ok" ? "In range" : tone === "watch" ? "Watch" : "Abnormal"}
+                  </span>
+                </div>
+              );
+            })}
+            <p className="twin-readings__note">
+              Colours follow this patient's thresholds, not population ranges.
+            </p>
+          </div>
+        )}
+      </div>
 
       {selected && (
         <OrganCard name={selected} state={payload} onClose={() => setSelected(null)} />
       )}
 
-      <p className="small muted" style={{ margin: 0 }}>
+      <p className="small muted twin-help">
         {liveOverride
-          ? "3D anatomy synced live with your connected smartwatch — abnormal heart, lung, or temperature values highlight directly on the body."
+          ? "3D anatomy synced live with the connected smartwatch — abnormal heart, lung, or temperature values highlight directly on the body."
           : state.timestamp
-            ? "3D anatomy driven live by your latest wearable heart rate, SpO₂, respiration, and temperature."
-            : "Connect your watch or start streaming to animate and highlight the 3D body."}{" "}
+            ? "3D anatomy driven by the latest wearable heart rate, SpO₂, respiration, and temperature."
+            : "Connect a watch or start streaming to animate and highlight the 3D body."}{" "}
         Drag to rotate, scroll to zoom, click any organ to inspect. {ANATOMY_CREDIT}
       </p>
     </div>
   );
+}
+
+const TWIN_READINGS = [
+  { key: "heart_rate", label: "Heart rate", unit: "bpm", digits: 0 },
+  { key: "spo2", label: "Oxygen (SpO₂)", unit: "%", digits: 1 },
+  { key: "respiratory_rate", label: "Breathing", unit: "br/min", digits: 0 },
+  { key: "temperature", label: "Temperature", unit: "°C", digits: 1 },
+] as const;
+
+function readingTone(status?: AssessmentStatus): "ok" | "watch" | "alert" {
+  if (status === "anomalous") return "alert";
+  if (status === "watch") return "watch";
+  return "ok";
 }

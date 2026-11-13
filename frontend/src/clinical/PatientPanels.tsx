@@ -17,9 +17,17 @@ export function VitalsStrip({
   untrusted: string[];
 }) {
   if (!observation) return <Empty>No reading received yet.</Empty>;
+  const systolic = observation.systolic_bp;
+  const diastolic = observation.diastolic_bp;
+  const bpBad = untrusted.includes("systolic_bp");
+  const bpStatus = vitalStatus("systolic_bp", systolic);
+  const bpAbsent = systolic === null && diastolic === null;
+  const bpTone = bpBad ? "untrusted" : bpStatus.tone;
+  const bpRange = VITAL_RANGE.systolic_bp;
+  const diaRange = VITAL_RANGE.diastolic_bp;
   return (
     <div className="vitals">
-      {METRIC_ORDER.map((metric) => {
+      {METRIC_ORDER.filter((metric) => metric !== "systolic_bp").map((metric) => {
         const meta = LOINC[metric];
         const value = observation[metric];
         const bad = untrusted.includes(metric);
@@ -54,6 +62,30 @@ export function VitalsStrip({
           </div>
         );
       })}
+      <div className={`vital vital--bp vital--${bpTone}`}>
+        <div className="vital__label">
+          <span className="vital__name">Blood pressure</span>
+          <span className={`vital__pill vital__pill--${bpTone}`}>
+            {bpBad ? "Sensor fault" : bpStatus.label}
+          </span>
+        </div>
+        <div className="vital__value">
+          {bpAbsent
+            ? "—"
+            : `${num(systolic, 1)}/${diastolic === null ? "—" : num(diastolic, 1)}`}
+          {!bpAbsent && <span className="vital__unit">mmHg</span>}
+        </div>
+        <div className="vital__foot">
+          <span className={`vital__note${bpBad ? " vital__note--warn" : ""}`}>
+            {bpBad
+              ? "withheld — sensor fault"
+              : bpAbsent
+                ? "not reported"
+                : `Normal ${bpRange[0]}–${bpRange[1]} / ${diaRange[0]}–${diaRange[1]} mmHg`}
+          </span>
+          <span className="code vital__code">8480-6 · 8462-4</span>
+        </div>
+      </div>
     </div>
   );
 }

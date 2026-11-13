@@ -19,6 +19,7 @@ COPY backend/ backend/
 COPY digital_twin/ digital_twin/
 COPY simulator/ simulator/
 COPY scripts/ scripts/
+COPY models/ models/
 COPY data/demo_recording.jsonl data/demo_recording.jsonl
 COPY data/sample_real/ data/sample_real/
 # The Android app, so the website can offer it for download (QR code on My data).

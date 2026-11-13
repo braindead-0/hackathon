@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 from typing import Any
@@ -10,16 +11,27 @@ import joblib
 import numpy as np
 import pandas as pd
 
+log = logging.getLogger("ps03.xgb")
+
 ROOT = Path(__file__).resolve().parents[3]
 BUNDLE_PATH = ROOT / "models" / "xgboost_risk_bundle.joblib"
 
 _BUNDLE: dict[str, Any] | None = None
+_BUNDLE_FAILED = False
 
 
 def _get_bundle() -> dict[str, Any] | None:
-    global _BUNDLE
-    if _BUNDLE is None and BUNDLE_PATH.exists():
+    global _BUNDLE, _BUNDLE_FAILED
+    if _BUNDLE is not None or _BUNDLE_FAILED:
+        return _BUNDLE
+    if not BUNDLE_PATH.exists():
+        _BUNDLE_FAILED = True
+        return None
+    try:
         _BUNDLE = joblib.load(BUNDLE_PATH)
+    except Exception as exc:  # e.g. xgboost not installed in this environment
+        _BUNDLE_FAILED = True
+        log.warning("XGBoost bundle unavailable (%s); scoring with NEWS2 only", exc)
     return _BUNDLE
 
 

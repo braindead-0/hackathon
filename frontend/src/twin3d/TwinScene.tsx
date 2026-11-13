@@ -32,7 +32,10 @@ export function TwinScene({
   const labelEls = useRef<Record<LabelKey, HTMLDivElement | null>>({ heart: null, lung: null, temp: null });
   const labels = labelContent(payload);
   return (
-    <div className="twin-canvas" style={{ height }}>
+    <div
+      className="twin-canvas"
+      style={{ height, minHeight: height === "100%" ? undefined : 0 }}
+    >
       <ModelBoundary
         fallback={
           <p className="twin-canvas__error">
@@ -205,19 +208,20 @@ function Anatomy({
   // Frame the loaded body to fill the viewport instead of trusting fixed camera constants.
   useEffect(() => {
     const box = new THREE.Box3().setFromObject(root);
-    if (box.isEmpty()) return;
+    if (box.isEmpty() || size.width < 2 || size.height < 2) return;
     const center = box.getCenter(new THREE.Vector3());
     const extent = box.getSize(new THREE.Vector3());
     const cam = camera as THREE.PerspectiveCamera;
     const vFov = (cam.fov * Math.PI) / 180;
-    const aspect = cam.aspect || size.width / Math.max(size.height, 1);
+    const aspect = size.width / Math.max(size.height, 1);
     const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
     const dist =
-      Math.max(extent.y / 2 / Math.tan(vFov / 2), extent.x / 2 / Math.tan(hFov / 2)) * 1.12;
+      Math.max(extent.y / 2 / Math.tan(vFov / 2), extent.x / 2 / Math.tan(hFov / 2)) * 1.34;
     cam.position.set(center.x, center.y, center.z + dist);
     if (controls) {
-      controls.minDistance = dist * 0.4;
-      controls.maxDistance = dist * 2.2;
+      // 0.8× fit still shows the whole body; 1.3× stops the model shrinking to a speck.
+      controls.minDistance = dist * 0.8;
+      controls.maxDistance = dist * 1.3;
       controls.target.copy(center);
       controls.update();
     }
@@ -225,6 +229,12 @@ function Anatomy({
   }, [root, camera, controls, size.width, size.height]);
   const visRef = useRef(labelVisible);
   visRef.current = labelVisible;
+  const labelAnchors = useRef<{
+    width: number;
+    height: number;
+    keys: LabelKey[];
+    els: Partial<Record<LabelKey, { w: number; h: number }>>;
+  }>({ width: 0, height: 0, keys: [], els: {} });
   const anchors = useMemo(() => {
     const p = (n: string, fallback: [number, number, number]): [number, number, number] =>
       parts[n] ? [parts[n].position.x, parts[n].position.y, parts[n].position.z + 0.04] : fallback;
@@ -314,11 +324,19 @@ function Anatomy({
 
     // Position the DOM labels at the projected callout ends (hidden while lying down).
     posture.current.updateMatrixWorld();
-    for (const key of ["heart", "lung", "temp"] as LabelKey[]) {
+    const a = labelAnchors.current;
+    if (a.width !== size.width || a.height !== size.height) {
+      a.width = size.width;
+      a.height = size.height;
+      a.els = {};
+      a.keys = [];
+    }
+    const shown = a.keys;
+    shown.length = 0;
+    for (const key of ["temp", "lung", "heart"] as LabelKey[]) {
       const el = labelEls.current[key];
       if (!el) continue;
-      const show = visRef.current[key] && c.lying < 0.05;
-      if (!show) {
+      if (!(visRef.current[key] && c.lying < 0.05)) {
         el.style.display = "none";
         continue;
       }
@@ -329,8 +347,34 @@ function Anatomy({
         continue;
       }
       el.style.display = "block";
-      el.style.left = `${((tmp.v.x + 1) / 2) * size.width}px`;
-      el.style.top = `${((1 - tmp.v.y) / 2) * size.height}px`;
+      const w = el.offsetWidth || a.els[key]?.w || 90;
+      const h = el.offsetHeight || a.els[key]?.h || 26;
+      if (el.offsetWidth > 0) a.els[key] = { w, h };
+      shown.push(key);
+      // Keep the bubble's anchor inside the canvas so a zoomed or narrow view cannot clip it.
+      el.style.left =
+        key === "lung"
+          ? `${Math.min(Math.max(((tmp.v.x + 1) / 2) * size.width, w + 16), size.width - 8)}px`
+          : `${Math.min(Math.max(((tmp.v.x + 1) / 2) * size.width, 6), Math.max(size.width - w - 16, 6))}px`;
+      el.style.top = `${Math.min(Math.max(((1 - tmp.v.y) / 2) * size.height, h / 2 + 8), Math.max(size.height - h / 2 - 8, h / 2 + 8))}px`;
+    }
+    // Nudge stacked bubbles apart instead of letting them overlap at the top of the frame.
+    for (let i = 0; i < shown.length; i++) {
+      for (let j = i + 1; j < shown.length; j++) {
+        const ea = labelEls.current[shown[i]];
+        const eb = labelEls.current[shown[j]];
+        if (!ea || !eb) continue;
+        const ia = a.els[shown[i]];
+        const ib = a.els[shown[j]];
+        if (!ia || !ib) continue;
+        const ya = parseFloat(ea.style.top);
+        const yb = parseFloat(eb.style.top);
+        const gap = (ia.h + ib.h) / 2 + 4;
+        if (Math.abs(ya - yb) < gap) {
+          const down = Math.min(size.height - ib.h / 2 - 8, Math.max(yb, ya + gap));
+          eb.style.top = `${down}px`;
+        }
+      }
     }
   });
 

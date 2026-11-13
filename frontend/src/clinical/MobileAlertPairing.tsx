@@ -41,38 +41,42 @@ export function MobileAlertPairing({ patientId }: { patientId: string }) {
   };
 
   const expires = pairing ? Math.max(0, Math.ceil((pairing.deadline - now) / 60000)) : 0;
+  const online = (status?.connected ?? 0) > 0;
 
   return (
-    <div className="panel" style={{ padding: 14 }}>
-      <div className="spread" style={{ gap: 12, flexWrap: "wrap" }}>
-        <div>
-          <strong className="small">VitalTrack phone alerts</strong>
-          <div className="small muted" role="status">
-            {status === null ? "Checking phone connection…" : status.connected > 0
-              ? `${status.connected} phone${status.connected > 1 ? "s" : ""} connected — live alert sync`
-              : status.paired > 0 ? "Phone paired but offline — reopen VitalTrack"
-                : "Pair VitalTrack to ring and vibrate with your smartwatch alerts"}
-          </div>
-        </div>
-        <button type="button" className="btn btn--small" onClick={generateCode} disabled={busy}>
-          {busy ? "Creating code…" : pairing ? "New pairing code" : "Pair VitalTrack"}
-        </button>
-      </div>
+    <div className="pairing-bar">
+      <span className={`pairing-bar__dot${online ? " pairing-bar__dot--on" : ""}`} aria-hidden />
+      <strong className="pairing-bar__name">VitalTrack phone</strong>
+      <span className="pairing-bar__status" role="status">
+        {status === null
+          ? "checking connection…"
+          : status.connected > 0
+            ? `${status.connected} phone${status.connected > 1 ? "s" : ""} connected — alerts sync live`
+            : status.paired > 0
+              ? "paired · phone offline — reopen VitalTrack"
+              : "not paired — ring and vibrate with abnormal alerts"}
+      </span>
+      <button type="button" className="btn btn--small" onClick={generateCode} disabled={busy}>
+        {busy ? "Creating code…" : pairing ? "New code" : "Pair VitalTrack"}
+      </button>
       {pairing && (
-        <div className="notice" style={{ marginTop: 12 }}>
-          <div>In VitalTrack, open <strong>Profile → Patient alert sync</strong>.</div>
-          <div className="small" style={{ marginTop: 8 }}>Server address (same Wi-Fi):</div>
-          {pairing.server_urls.length ? pairing.server_urls.map((url) => (
-            <div key={url} style={{ overflowWrap: "anywhere" }}><code>{url}</code></div>
-          )) : <div className="small">No local network address found. Connect this computer to Wi-Fi.</div>}
-          <div style={{ marginTop: 8 }}>Pairing code: <strong style={{ letterSpacing: "0.15em" }}>{expires ? pairing.code : "Expired"}</strong></div>
-          <div className="small muted">{expires ? `Single use · expires in ${expires} min · keep this code private` : "Generate a new code to connect."}</div>
+        <div className="pairing-bar__code">
+          <span>
+            In VitalTrack open <strong>Profile → Patient alert sync</strong>. Server{" "}
+            {pairing.server_urls.length ? (
+              <code>{pairing.server_urls[0]}</code>
+            ) : (
+              <em>unavailable — connect this computer to Wi-Fi</em>
+            )}
+            {" · "}code{" "}
+            <strong className="pairing-bar__pin">{expires ? pairing.code : "expired"}</strong>
+            {expires > 0 && <span className="muted"> · expires in {expires} min, single use</span>}
+          </span>
         </div>
       )}
-      <div className="small muted" style={{ marginTop: 8 }}>
-        Keep VitalTrack open with native alerts enabled. Background delivery is not guaranteed.
-        Normal readings and sensor faults do not ring the phone.
-      </div>
+      <span className="pairing-bar__hint" title="Normal readings and sensor faults do not ring the phone.">
+        Keep VitalTrack open with native alerts enabled — background delivery isn’t guaranteed.
+      </span>
       {error && <div className="notice notice--warn" role="alert">{error}</div>}
     </div>
   );

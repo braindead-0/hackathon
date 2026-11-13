@@ -41,10 +41,11 @@ mobile/android/app/build/
 mobile/android/local.properties
 *.apk
 !downloads/health-twin.apk
+!frontend/public/downloads/health-twin.apk
 frontend/tsconfig.tsbuildinfo
 
 # Vendored binaries (HAPI FHIR server WAR, downloaded by scripts/setup_hapi.py)
-vendor/
+/vendor/
 
 # Runtime / HAPI FHIR data
 var/

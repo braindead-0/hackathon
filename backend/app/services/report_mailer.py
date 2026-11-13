@@ -17,7 +17,7 @@ from threading import RLock
 from typing import Any
 
 from backend.app.services import email_report, insforge_storage
-from backend.app.services.envconf import REPO_ROOT
+from backend.app.services.envconf import REPO_ROOT, load_env
 
 log = logging.getLogger("digital_twin")
 
@@ -61,6 +61,150 @@ def register_recipient(owner_id: str, role: str | None, name: str | None, email:
         }
         _save(state)
     return effective
+
+
+def normalize_phone(phone: str | None) -> str | None:
+    raw = (phone or "").strip().removeprefix("whatsapp:")
+    if not raw:
+        return None
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not (8 <= len(digits) <= 15):
+        raise ValueError("Enter a WhatsApp number in international format, e.g. +919876543210")
+    return f"+{digits}"
+
+
+MAX_EMERGENCY_CONTACTS = 6
+
+
+def _clean_email(email: str | None) -> str | None:
+    raw = (email or "").strip()
+    if not raw:
+        return None
+    if "@" not in raw or len(raw) > 200:
+        raise ValueError("Enter a valid email address, e.g. name@example.com")
+    return raw
+
+
+def _contact_field(raw: Any, key: str) -> Any:
+    return raw.get(key) if isinstance(raw, dict) else getattr(raw, key, None)
+
+
+def _clean_contact(raw: Any) -> dict[str, str] | None:
+    name = str(_contact_field(raw, "name") or "").strip()[:80]
+    relation = str(_contact_field(raw, "relation") or "").strip()[:40]
+    if not name and not str(_contact_field(raw, "phone") or "").strip():
+        return None
+    phone = normalize_phone(_contact_field(raw, "phone"))
+    if not phone:
+        raise ValueError(f"Add a WhatsApp number for {name or 'the emergency contact'}")
+    return {"name": name or "Emergency contact", "relation": relation, "phone": phone}
+
+
+def _role_of(owner_id: str) -> str:
+    return owner_id.split(":", 1)[0] if ":" in owner_id else "guest"
+
+
+def _last_owner_with_phone(state: dict[str, Any], role: str) -> str | None:
+    for owner, profile in reversed(list(state.get("alert_profiles", {}).items())):
+        if _role_of(owner) == role and profile.get("phone"):
+            return owner
+    return None
+
+
+def get_alert_profile(owner_id: str) -> dict[str, Any]:
+    profile = _load().get("alert_profiles", {}).get(owner_id) or {}
+    return {
+        "name": profile.get("name"),
+        "email": profile.get("email"),
+        "phone": profile.get("phone"),
+        "contacts": list(profile.get("contacts") or []),
+    }
+
+
+def set_alert_profile(
+    owner_id: str,
+    *,
+    name: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+    contacts: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Save a person's alert profile: their own number plus family/emergency contacts."""
+    cleaned_phone = normalize_phone(phone)
+    cleaned_email = _clean_email(email)
+    cleaned_contacts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in contacts or []:
+        contact = _clean_contact(raw)
+        if contact and contact["phone"] not in seen:
+            seen.add(contact["phone"])
+            cleaned_contacts.append(contact)
+    if len(cleaned_contacts) > MAX_EMERGENCY_CONTACTS:
+        raise ValueError(f"Keep at most {MAX_EMERGENCY_CONTACTS} emergency contacts")
+    profile = {
+        "name": (name or "").strip()[:120] or None,
+        "email": cleaned_email,
+        "phone": cleaned_phone,
+        "contacts": cleaned_contacts,
+    }
+    with _state_lock:
+        state = _load()
+        profiles = state.setdefault("alert_profiles", {})
+        if any(profile.values()):
+            profiles[owner_id] = profile
+        else:
+            profiles.pop(owner_id, None)
+        role = _role_of(owner_id)
+        last = state.setdefault("alert_last", {})
+        if cleaned_phone:
+            last[role] = owner_id
+        elif last.get(role) == owner_id:
+            last[role] = _last_owner_with_phone(state, role)
+        _save(state)
+    return get_alert_profile(owner_id)
+
+
+def set_alert_phone(owner_id: str, phone: str | None) -> str | None:
+    """Update only the phone on an existing alert profile."""
+    current = get_alert_profile(owner_id)
+    return set_alert_profile(
+        owner_id,
+        name=current["name"],
+        email=current["email"],
+        phone=phone,
+        contacts=current["contacts"],
+    )["phone"]
+
+
+def default_alert_phone() -> str | None:
+    """CLINICIAN_ALERT_PHONE: the server-wide doctor number when none is saved."""
+    try:
+        return normalize_phone(load_env().get("CLINICIAN_ALERT_PHONE"))
+    except ValueError:
+        log.warning("CLINICIAN_ALERT_PHONE in .env is not a valid number; ignoring it")
+        return None
+
+
+def saved_alert_phone(owner_id: str) -> str | None:
+    return get_alert_profile(owner_id)["phone"]
+
+
+def alert_phone(owner_id: str | None = None) -> str | None:
+    """A person's saved phone, else the last-active doctor's, else the server default."""
+    state = _load()
+    if owner_id is None:
+        owner_id = (state.get("alert_last") or {}).get("doctor")
+    if owner_id:
+        profile = state.get("alert_profiles", {}).get(owner_id) or {}
+        if profile.get("phone"):
+            return profile["phone"]
+    return default_alert_phone()
+
+
+def alert_contacts_for_role(role: str) -> list[dict[str, str]]:
+    """Emergency contacts of the last profile saved for a role (doctor/patient)."""
+    owner = (_load().get("alert_last") or {}).get(role)
+    return get_alert_profile(owner)["contacts"] if owner else []
 
 
 def recipient_email(owner_id: str | None) -> str:

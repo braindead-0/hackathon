@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Start the HAPI FHIR R4 server on port 8080 with persistent H2 storage.
+# Start the HAPI FHIR R4 server on port 8090 with persistent H2 storage.
 # Requires: python scripts/setup_hapi.py  (run once)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+HAPI_PORT="${HAPI_PORT:-8090}"
 
 CLASSES="vendor/hapi/unpacked/WEB-INF/classes"
 if [ ! -d "$CLASSES" ]; then
@@ -14,6 +16,7 @@ fi
 JAVA_CMD="${HAPI_JAVA:-}"
 if [ -z "$JAVA_CMD" ]; then
   for candidate in \
+    "vendor/jdk17/bin/java" \
     "/c/Program Files/Microsoft/jdk-17.0.19.10-hotspot/bin/java" \
     "/c/Program Files/Eclipse Adoptium/jdk-17.0.18.8-hotspot/bin/java" \
     "/c/Program Files/Eclipse Adoptium/jdk-17.0.19.10-hotspot/bin/java"; do
@@ -28,7 +31,7 @@ mkdir -p var/hapi
 CP="$CLASSES;vendor/hapi/unpacked/WEB-INF/lib/*"
 for jar in vendor/hapi/*.jar; do CP="$CP;$jar"; done
 
-echo "Starting HAPI FHIR R4 on http://localhost:8080/fhir"
+echo "Starting HAPI FHIR R4 on http://localhost:$HAPI_PORT/fhir"
 exec "$JAVA_CMD" -Xmx1g -cp "$CP" ca.uhn.fhir.jpa.starter.Application \
   --spring.config.location=file:./config/hapi.yaml \
-  --server.port=8080
+  --server.port="$HAPI_PORT"

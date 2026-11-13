@@ -1,5 +1,5 @@
 @echo off
-REM Start the HAPI FHIR R4 server on port 8080 with persistent H2 storage.
+REM Start the HAPI FHIR R4 server on port 8090 with persistent H2 storage.
 REM Requires: python scripts\setup_hapi.py  (run once)
 setlocal
 cd /d "%~dp0.."
@@ -25,7 +25,7 @@ setlocal enabledelayedexpansion
 set "CP=vendor\hapi\unpacked\WEB-INF\classes;vendor\hapi\unpacked\WEB-INF\lib\*"
 for %%J in (vendor\hapi\*.jar) do set "CP=!CP!;%%J"
 
-echo Starting HAPI FHIR R4 on http://localhost:8080/fhir
-"%JAVA_CMD%" -Xmx1g -cp "!CP!" ca.uhn.fhir.jpa.starter.Application --spring.config.location=file:./config/hapi.yaml --server.port=8080
+echo Starting HAPI FHIR R4 on http://localhost:8090/fhir
+"%JAVA_CMD%" -Xmx1g -cp "!CP!" ca.uhn.fhir.jpa.starter.Application --spring.config.location=file:./config/hapi.yaml --server.port=8090
 endlocal
 endlocal

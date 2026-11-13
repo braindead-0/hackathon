@@ -35,6 +35,10 @@ const CAPABILITIES = [
   },
 ];
 
+function roleFromHash(): "doctor" | "patient" {
+  return /[?&]role=patient\b/.test(window.location.hash) ? "patient" : "doctor";
+}
+
 export function SignInPage({
   rows,
   onSignIn,
@@ -42,7 +46,13 @@ export function SignInPage({
   rows: PatientRow[];
   onSignIn: (session: AuthSession) => void;
 }) {
-  const [role, setRole] = useState<"doctor" | "patient">("doctor");
+  const [role, setRole] = useState<"doctor" | "patient">(roleFromHash);
+
+  useEffect(() => {
+    const onHash = () => setRole(roleFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   // Doctor form state
   const [clinicianName, setClinicianName] = useState("Dr. Ananya Rao");
@@ -77,7 +87,9 @@ export function SignInPage({
   const patientOptions = rows.length > 0 ? rows : FALLBACK_PATIENTS;
 
   useEffect(() => {
-    if (!selectedPatientId && patientOptions.length > 0) {
+    if (patientOptions.length === 0) return;
+    // A profile picked from the fallback list may not exist once live rows arrive.
+    if (!patientOptions.some((p) => p.patient_id === selectedPatientId)) {
       setSelectedPatientId(patientOptions[0].patient_id);
     }
   }, [patientOptions, selectedPatientId]);

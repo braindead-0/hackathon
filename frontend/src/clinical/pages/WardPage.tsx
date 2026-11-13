@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { AuthSession } from "../auth";
-import { buildDoctorWardReport } from "../reportGenerator";
-import { ReportEmailStatus, useReportEmail } from "../reportEmail";
+import { ReportModal } from "../ReportModal";
+import { buildDoctorWardReport, type GeneratedReport } from "../reportGenerator";
 import { ScenarioControls } from "../ScenarioControls";
 import { WardTable } from "../WardTable";
 import type { PatientRow, ReplayStatus, Tier } from "../types";
@@ -30,9 +30,9 @@ function TierCensus({ rows }: { rows: PatientRow[] }) {
   }, [rows]);
   const tiers: Tier[] = ["URGENT", "REVIEW", "WATCH", "NORMAL"];
   return (
-    <div className="metrics">
+    <div className="metrics metrics--census">
       {tiers.map((tier) => (
-        <div className="metric" key={tier}>
+        <div className={`metric metric--${tier.toLowerCase()}`} key={tier}>
           <div className="metric__label">
             <TierBadge tier={tier} />
           </div>
@@ -67,7 +67,7 @@ export function WardPage({
   onSelect: (id: string) => void;
   onRefresh: () => void;
 }) {
-  const reportEmail = useReportEmail();
+  const [report, setReport] = useState<GeneratedReport | null>(null);
   const needingAttention = rows.filter(
     (r) => r.timestamp && r.alert_kind === "CLINICAL" && !r.suppressed && TIER_RANK[r.tier] > 0,
   ).length;
@@ -78,39 +78,42 @@ export function WardPage({
 
   return (
     <div className="col">
-      <div className="spread">
-        <div>
-          <h1 className="section-title">Post-discharge ward</h1>
+      <section className="ward-head">
+        <div className="ward-head__intro">
+          <p className="ward-head__eyebrow">Post-discharge monitoring</p>
+          <h1 className="section-title">Ward overview</h1>
           <p className="lede">
-            {rows.length} synthetic patient profiles available for virtual wearable
-            or BIDMC replay. {needingAttention} need clinical attention
-            {deviceIssues > 0 && `, ${deviceIssues} have a device issue rather than a clinical one`}.
+            {rows.length} synthetic discharge profiles on virtual wearable or BIDMC
+            replay. <strong>{needingAttention}</strong> need clinical attention
+            {deviceIssues > 0 && `; ${deviceIssues} have a device issue rather than a clinical one`}.
           </p>
         </div>
-        <div className="row row--tight small muted" style={{ alignItems: "center" }}>
-          <span className="chip">{stored.toLocaleString()} FHIR observations stored</span>
-          <span className="chip chip--sensor">{suppressed} readings suppressed</span>
+        <div className="ward-head__actions">
+          <span className="chip chip--flat">{stored.toLocaleString()} FHIR observations</span>
+          <span className="chip chip--flat chip--sensor">{suppressed} readings suppressed</span>
           <button
             className="btn btn--small btn--primary"
-            disabled={reportEmail.status.sending}
-            onClick={() => reportEmail.generate(buildDoctorWardReport(rows, session), session)}
+            onClick={() => setReport(buildDoctorWardReport(rows, session))}
           >
             Generate Ward Report
           </button>
         </div>
-      </div>
-
-      <ReportEmailStatus status={reportEmail.status} />
+      </section>
 
       <TierCensus rows={rows} />
-      <p className="small muted">
-        Census includes trusted clinical readings only. {awaitingReadings} awaiting a
+      <p className="small muted ward-census-note">
+        Census counts trusted clinical readings only. {awaitingReadings} awaiting a
         first reading; {deviceIssues} with a device issue are not counted as Normal.
       </p>
 
       <Panel
         title="Patients"
         hint="most severe first · select a row for the full explanation"
+        action={
+          <span className="small muted">
+            {rows.length} profiles · {needingAttention} flagged
+          </span>
+        }
         flush
       >
         <WardTable rows={rows} streams={replay?.streams ?? []} selected={selected} onSelect={onSelect} />
@@ -146,6 +149,10 @@ export function WardPage({
         {TIER_LABEL.REVIEW} = NEWS2 5–6 · {TIER_LABEL.URGENT} = NEWS2 ≥ 7. Sustained
         drift from the patient's own baseline escalates one tier above the aggregate.
       </p>
+
+      {report && (
+        <ReportModal report={report} session={session} onClose={() => setReport(null)} />
+      )}
     </div>
   );
 }

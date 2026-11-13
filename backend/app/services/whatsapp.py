@@ -61,27 +61,95 @@ def _send_twilio_message(body: str, recipient_override: str | None = None) -> di
         )
         from_wa = _normalize_whatsapp(sender)
         sids: list[str] = []
+        errors: list[str] = []
         for to_wa in recipients:
-            msg = client.messages.create(from_=from_wa, to=to_wa, body=body[:1580])
-            sids.append(msg.sid)
-        return {"sent": True, "dry_run": False, "recipients": recipients, "sids": sids}
+            try:
+                msg = client.messages.create(from_=from_wa, to=to_wa, body=body[:1580])
+                sids.append(msg.sid)
+            except Exception as exc:
+                # one unreachable number must not hide the successful sends
+                errors.append(f"{to_wa}: {exc}")
+        if not sids:
+            return {"sent": False, "error": "; ".join(errors), "recipients": recipients}
+        result = {"sent": True, "dry_run": False, "recipients": recipients, "sids": sids}
+        if errors:
+            result["errors"] = errors
+        return result
     except Exception as exc:
         log.warning("WhatsApp send failed: %s", exc)
         return {"sent": False, "error": str(exc), "recipients": recipients}
 
 
-_TIER_URGENCY = {
-    "URGENT": "need attention right now",
-    "REVIEW": "need a review today",
-    "WATCH": "are worth keeping an eye on",
-    "NORMAL": "look steady",
-}
-
 _TIER_ACTION = {
-    "URGENT": "Please seek emergency care now or call your clinical team immediately. Don't wait.",
-    "REVIEW": "Please contact your clinical team today for a review. Don't wait for your next scheduled visit.",
+    "URGENT": "Please seek emergency medical attention immediately or contact your clinical care team. Do not delay.",
+    "REVIEW": "Please contact your clinical care team today for a review. Do not wait for your next scheduled visit.",
     "WATCH": "Keep a close eye on how you feel and re-check your vitals soon. Contact your team if anything worsens.",
     "NORMAL": "No action needed right now. Continue your routine monitoring.",
+}
+
+_CLINICIAN_ACTION = {
+    "URGENT": "Review immediately and escalate per local protocol.",
+    "REVIEW": "Review today and decide on escalation.",
+    "WATCH": "Review when convenient; no immediate action needed.",
+    "NORMAL": "No action needed; routine monitoring continues.",
+}
+
+_ALERT_HEADING = {
+    "patient": {
+        "URGENT": "⚠️ VITALTWIN | URGENT HEALTH ALERT",
+        "REVIEW": "🔔 VITALTWIN | REVIEW NEEDED",
+        "WATCH": "👀 VITALTWIN | WATCH — KEEP MONITORING",
+        "NORMAL": "✅ VITALTWIN | READINGS STEADY",
+    },
+    "clinician": {
+        "URGENT": "⚠️ VITALTWIN | URGENT CLINICAL ALERT",
+        "REVIEW": "🔔 VITALTWIN | CLINICAL REVIEW NEEDED",
+        "WATCH": "👀 VITALTWIN | CLINICAL WATCH",
+        "NORMAL": "✅ VITALTWIN | CLINICAL READINGS STEADY",
+    },
+    "family": {
+        "URGENT": "⚠️ VITALTWIN | URGENT EMERGENCY ALERT",
+        "REVIEW": "🔔 VITALTWIN | HEALTH UPDATE",
+        "WATCH": "👀 VITALTWIN | HEALTH UPDATE",
+        "NORMAL": "✅ VITALTWIN | HEALTH UPDATE",
+    },
+}
+
+_ALERT_LEAD = {
+    "patient": {
+        "URGENT": "Your latest health readings indicate a high clinical risk.",
+        "REVIEW": "Your latest health readings need a clinical review.",
+        "WATCH": "Your latest health readings are worth keeping an eye on.",
+        "NORMAL": "Your latest health readings are within the expected range.",
+    },
+    "clinician": {
+        "URGENT": "Latest readings indicate a high clinical risk.",
+        "REVIEW": "Latest readings need clinical review.",
+        "WATCH": "Latest readings are drifting; monitor closely.",
+        "NORMAL": "Latest readings are within the expected range.",
+    },
+    "family": {
+        "URGENT": "You are listed as an emergency contact. Their latest readings indicate a high clinical risk.",
+        "REVIEW": "Their latest readings need a clinical review.",
+        "WATCH": "Their latest readings are worth keeping an eye on.",
+        "NORMAL": "Their latest readings are within the expected range.",
+    },
+}
+
+_ACTION_TITLE = {
+    "URGENT": "Immediate Action Required",
+    "REVIEW": "Action Needed Today",
+    "WATCH": "Keep Monitoring",
+    "NORMAL": "No Action Needed",
+}
+
+_SCORE_ICON = {"URGENT": "🚨", "REVIEW": "🟠", "WATCH": "🟡", "NORMAL": "🟢"}
+
+_VITAL_DISPLAY = {
+    "respiratory_rate": ("Respiratory Rate", "breaths/min"),
+    "heart_rate": ("Heart Rate", "bpm"),
+    "spo2": ("SpO₂", "%"),
+    "temperature": ("Temperature", "°C"),
 }
 
 
@@ -92,32 +160,79 @@ def _num(value: float | None) -> str:
     return str(int(f)) if f.is_integer() else f"{f:.1f}"
 
 
-def _vital_phrase(key: str, value: float | None) -> str | None:
-    if value is None:
-        return None
-    n = _num(value)
-    if key == "heart_rate":
-        word = "high" if value > 100 else ("low" if value < 60 else "steady")
-        return f"your heart rate is {word} at {n} bpm"
+def _vital_qualifier(key: str, value: float) -> str:
     if key == "spo2":
-        word = "low" if value < 95 else "on target"
-        return f"your oxygen is {word} at {n}%"
-    if key == "respiratory_rate":
-        word = "fast" if value > 20 else ("slow" if value < 12 else "steady")
-        return f"your breathing is {word} at {n}/min"
-    if key == "temperature":
+        if value < 90:
+            return " (Critically Low)"
+        if value < 95:
+            return " (Low)"
+    elif key == "heart_rate":
+        if value >= 130:
+            return " (Critically High)"
+        if value > 100:
+            return " (High)"
+        if value < 50:
+            return " (Low)"
+    elif key == "respiratory_rate":
+        if value >= 25:
+            return " (High)"
+        if value > 20:
+            return " (Elevated)"
+        if value < 12:
+            return " (Low)"
+    elif key == "temperature":
+        if value >= 39:
+            return " (High Fever)"
         if value >= 38:
-            return f"your temperature is up at {n}°C (a fever)"
+            return " (Fever)"
         if value < 36:
-            return f"your temperature is low at {n}°C"
-        return f"your temperature is normal at {n}°C"
-    return None
+            return " (Low)"
+    return ""
 
 
-def _join_clauses(clauses: list[str]) -> str:
-    if len(clauses) == 1:
-        return clauses[0]
-    return ", ".join(clauses[:-1]) + " and " + clauses[-1]
+def _format_alert_message(
+    *,
+    audience: str,
+    patient_name: str,
+    patient_id: str,
+    tier: str,
+    news2_total: int | None,
+    vitals: dict[str, float | None],
+    narrative: str,
+    risk_level: str | None,
+    contact_name: str | None = None,
+) -> str:
+    patient = audience != "clinician"
+    lines = [_ALERT_HEADING[audience][tier]]
+    if audience == "family":
+        lines.append(f"Hello {contact_name or 'there'},")
+        lines.append(f"About: {patient_name}")
+    elif patient:
+        lines.append(f"Hello {(patient_name or 'there').split()[0]},")
+    else:
+        lines.append(f"Patient: {patient_name} ({patient_id})")
+    lines.append(_ALERT_LEAD[audience][tier])
+
+    readings = [
+        f"• {label}: {_num(vitals[key])}{unit if unit == '%' else ' ' + unit}"
+        f"{_vital_qualifier(key, float(vitals[key]))}"
+        for key, (label, unit) in _VITAL_DISPLAY.items()
+        if vitals.get(key) is not None
+    ]
+    if readings:
+        lines += ["", "📊 Current Health Readings" if patient else "📊 Current Readings", *readings]
+    if news2_total is not None:
+        label = (risk_level or "").replace(" clinical", "").strip().upper()
+        risk = f" — {label}" if label else ""
+        lines += ["", f"{_SCORE_ICON[tier]} NEWS2 Score: {news2_total}{risk}"]
+    if narrative and narrative.strip():
+        lines += ["", f"📝 {narrative.strip()}"]
+
+    action = _TIER_ACTION[tier] if patient else _CLINICIAN_ACTION[tier]
+    lines += ["", _ACTION_TITLE[tier], action, ""]
+    lines.append("— VitalTwin Clinical Care Team" if patient else "— VitalTwin Clinical Team")
+    lines.append("Clinical decision support, not a medical diagnosis.")
+    return "\n".join(lines)
 
 
 def format_alert(
@@ -130,37 +245,22 @@ def format_alert(
     narrative: str,
     abnormal: list[str] | None = None,
     risk_level: str | None = None,
+    audience: str = "patient",
+    contact_name: str | None = None,
 ) -> str:
-    """A plain, human care-team note shared by WhatsApp and Telegram."""
-    first = (patient_name or "there").split()[0]
-    urgency = _TIER_URGENCY.get(tier, _TIER_URGENCY["WATCH"])
-    action = _TIER_ACTION.get(tier, _TIER_ACTION["WATCH"])
-
-    keys = ("heart_rate", "spo2", "respiratory_rate", "temperature")
-    flagged = [
-        p
-        for p in (_vital_phrase(k, vitals.get(k)) for k in (abnormal or []) if k in keys)
-        if p
-    ]
-    clauses = flagged or [p for p in (_vital_phrase(k, vitals.get(k)) for k in keys) if p]
-
-    lines = [f"Hi {first}, this is your VitalTwin care team.", ""]
-    if clauses:
-        lines.append(f"Your latest readings {urgency}: {_join_clauses(clauses)}.")
-    if news2_total is not None:
-        risk = f" ({risk_level.lower()})" if risk_level else ""
-        lines.append(f"Your NEWS2 score is {news2_total}{risk}.")
-    lines += ["", action]
-    if narrative and narrative.strip():
-        lines += ["", narrative.strip()]
-    lines += [
-        "",
-        "If anything feels worse, call for help straight away.",
-        "",
-        "— Your VitalTwin care team",
-        "(Decision support, not a diagnosis.)",
-    ]
-    return "\n".join(lines)
+    """Emoji-structured urgent-alert copy for patients, clinicians and family contacts."""
+    safe_audience = audience if audience in _ALERT_HEADING else "patient"
+    return _format_alert_message(
+        audience=safe_audience,
+        patient_name=patient_name,
+        patient_id=patient_id,
+        tier=tier if tier in _ACTION_TITLE else "WATCH",
+        news2_total=news2_total,
+        vitals=vitals,
+        narrative=narrative,
+        risk_level=risk_level,
+        contact_name=contact_name,
+    )
 
 
 _REPORT_LEADINS = {
@@ -252,6 +352,8 @@ def send_whatsapp_alert(
     recipient_override: str | None = None,
     abnormal: list[str] | None = None,
     risk_level: str | None = None,
+    audience: str = "patient",
+    contact_name: str | None = None,
 ) -> dict[str, Any]:
     """Send a WhatsApp alert via Twilio using .env credentials."""
     body = format_alert(
@@ -263,8 +365,109 @@ def send_whatsapp_alert(
         narrative=narrative,
         abnormal=abnormal,
         risk_level=risk_level,
+        audience=audience,
+        contact_name=contact_name,
     )
+    return send_whatsapp_text(body, recipient_override=recipient_override)
+
+
+def send_whatsapp_text(body: str, recipient_override: str | None = None) -> dict[str, Any]:
+    """Send pre-composed text to an explicit number, or ALERT_RECIPIENTS."""
     return _send_twilio_message(body, recipient_override=recipient_override)
+
+
+def _plain_summary(text: str, limit: int = 900) -> str:
+    """Convert report markdown into a short plain-text note for WhatsApp."""
+    out: list[str] = []
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s or s.startswith(("#", "|", ">", "_")):
+            continue
+        if s.startswith("- **Generated:") or s.startswith("- **Prepared"):
+            continue
+        s = _strip_inline(s)
+        if s.startswith("- "):
+            s = "• " + s[2:]
+        out.append(s)
+    plain = "\n".join(out)
+    return plain[:limit].rstrip() + ("…" if len(plain) > limit else "")
+
+
+def format_report_review(
+    *,
+    patient_name: str,
+    patient_id: str,
+    title: str,
+    clinician: str,
+    reviewed_at: str,
+    notes: dict[str, str] | None = None,
+    patient_summary: str | None = None,
+    audience: str = "patient",
+) -> str:
+    """Message sent to both sides when a clinician revises a report."""
+    notes = notes or {}
+    assessment = (notes.get("assessment") or "").strip()
+    plan = (notes.get("plan") or "").strip()
+    follow_up = (notes.get("followUp") or "").strip()
+
+    if audience == "clinician":
+        lines = [f"REPORT REVIEWED · {title}", f"Patient: {patient_name} ({patient_id})"]
+        lines.append(f"Reviewed by: {clinician} · {reviewed_at} UTC")
+        for label, text in (("Assessment", assessment), ("Plan", plan), ("Follow-up", follow_up)):
+            if text:
+                lines += ["", f"{label}: {text}"]
+        lines += ["", "The revised report is stored in the patient record."]
+        return "\n".join(lines)
+
+    first = (patient_name or "there").split()[0]
+    lines = [
+        f"Hi {first}, your VitalTwin care team has reviewed your report.",
+        f"Report: {title}",
+    ]
+    if assessment:
+        lines += ["", f"What we found: {assessment}"]
+    if plan:
+        lines += ["", f"What we suggest: {plan}"]
+    if follow_up:
+        lines += ["", f"Follow-up: {follow_up}"]
+    if patient_summary and patient_summary.strip():
+        cleaned = _plain_summary(patient_summary)
+        if cleaned:
+            lines += ["", cleaned]
+    lines += [
+        "",
+        "Open your dashboard to read the full report. If anything feels worse, contact your care team straight away.",
+        "",
+        "— Your VitalTwin care team",
+        "(Decision support, not a diagnosis.)",
+    ]
+    text = "\n".join(lines)
+    return text[:1580]
+
+
+def send_whatsapp_report_review(
+    *,
+    patient_name: str,
+    patient_id: str,
+    title: str,
+    clinician: str,
+    reviewed_at: str,
+    notes: dict[str, str] | None = None,
+    patient_summary: str | None = None,
+    recipient_override: str | None = None,
+    audience: str = "patient",
+) -> dict[str, Any]:
+    body = format_report_review(
+        patient_name=patient_name,
+        patient_id=patient_id,
+        title=title,
+        clinician=clinician,
+        reviewed_at=reviewed_at,
+        notes=notes,
+        patient_summary=patient_summary,
+        audience=audience,
+    )
+    return send_whatsapp_text(body, recipient_override=recipient_override)
 
 
 def send_whatsapp_report(
